@@ -1,0 +1,63 @@
+# GitLab Webhook 自动镜像构建服务 — 配置示例
+#
+# ${VAR} 占位符会在启动时从环境变量展开；引用未设置的环境变量将导致启动失败。
+
+server:
+  # HTTP 监听地址
+  listen: ":8080"
+  # git clone 的工作区根目录（容器内路径）
+  workspace: "/app/workspace"
+  # 构建日志存放目录（容器内路径），每个构建对应 <build_id>.log
+  logs_dir: "/app/logs"
+  # 待处理任务队列上限，超过后 webhook 返回 503
+  queue_size: 100
+  # 全局并行构建数；同一仓库的任务始终串行执行
+  concurrency: 2
+
+gitlab:
+  # Webhook Secret：与 GitLab 项目 Webhook 的 Secret token 完全一致
+  webhook_secret: "${GITLAB_WEBHOOK_SECRET}"
+
+# 仓库列表：为每个需要自动构建的 GitLab 项目添加一段配置
+repositories:
+  - # 仓库唯一名称（用于日志与同仓库串行判断）
+    name: "backend-api"
+    # 仓库 SSH 地址（通过 Deploy Key 拉取）
+    url: "ssh://git@code.zmatrix.cn:20022/jmatrix/atlas-backend-api.git"
+    # 触发分支白名单：精确名称或通配符（如 release/*）；
+    # Push 到这些分支才会触发构建
+    branches:
+      - "main"
+    # 分支正则门槛（可选，默认匹配所有分支）：
+    # 分支需先通过此正则，再命中 branches 白名单才会构建
+    # branch_regex: "^release/.*"
+    # SSH Deploy Key 私钥路径（可选；为空则使用容器默认 ssh 身份）
+    # deploy_key_path: "/run/secrets/backend-api_deploy_key"
+    build:
+      # 模板类型提示：go | node | vue | java
+      type: "go"
+      # 构建上下文（相对仓库根目录）
+      context: "."
+      # Dockerfile 来源：
+      #   - 内置模板名（go.Dockerfile / node.Dockerfile / vue.Dockerfile / java.Dockerfile）
+      #   - 或仓库内自有文件路径（如 Dockerfile）
+      dockerfile: "go.Dockerfile"
+      # 本地镜像名（不含标签；仅本地构建，不推送到任何 Registry）
+      image: "business-api"
+      # docker build --build-arg（可选）
+      # args:
+      #   APP_VERSION: "1.0.0"
+      # 是否额外打 :latest 标签（可选，默认 false）
+      # tag_latest: true
+      # 是否禁用构建缓存（可选，默认 false）
+      # no_cache: false
+
+  - name: "ex-user"
+    url: "ssh://git@code.zmatrix.cn:20022/xiaojy/yii3-ex-user.git"
+    branches:
+      - "main"
+    build:
+      type: "vue"
+      context: "."
+      dockerfile: "vue.Dockerfile"
+      image: "ex-user"

@@ -1,0 +1,26 @@
+# GitLab Webhook 自动镜像构建服务
+#
+# 安全提示：挂载 /var/run/docker.sock 等同于授予容器宿主机 root 级权限，
+# 请仅在受信任的内网构建机上部署，并限制可访问 webhook 端口的来源。
+services:
+  gitlab-builder:
+    image: gitlab-builder:latest
+    container_name: gitlab-builder
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      # 与 GitLab Webhook 的 Secret token 保持一致（必填，用强随机值）
+      GITLAB_WEBHOOK_SECRET: ${GITLAB_WEBHOOK_SECRET:?required - set a strong random secret}
+      # 可选：debug | info | warn | error
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      # 服务配置
+      - ./config/config.yaml:/app/config/config.yaml:ro
+      # SSH Deploy Key 目录（文件权限建议 chmod 600）
+      - ./secrets:/run/secrets:ro
+      # 构建工作区与构建日志（持久化）
+      - ./data:/app/workspace
+      - ./logs:/app/logs
+      # Docker Socket：服务通过宿主机 Docker 守护进程执行 docker build（仅本地构建，不推送）
+      - /var/run/docker.sock:/var/run/docker.sock
