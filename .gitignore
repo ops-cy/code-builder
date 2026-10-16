@@ -1,0 +1,5 @@
+# opencode日志
+/.omo/
+
+# 共享库示例文件
+/shared-libraries/
