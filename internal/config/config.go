@@ -10,11 +10,13 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Config is the root configuration document.
+// Config is the root configuration document. Repositories are not listed
+// here: every project on the GitLab host that sends a webhook to this service
+// triggers a build, with its URL and branch taken from the event payload.
 type Config struct {
-	Server       ServerConfig `yaml:"server"`
-	GitLab       GitLabConfig `yaml:"gitlab"`
-	Repositories []Repository `yaml:"repositories"`
+	Server ServerConfig `yaml:"server"`
+	GitLab GitLabConfig `yaml:"gitlab"`
+	Build  BuildConfig  `yaml:"build"`
 }
 
 // ServerConfig holds HTTP listener and workspace settings.
@@ -26,30 +28,66 @@ type ServerConfig struct {
 	Concurrency int    `yaml:"concurrency"`
 }
 
-// GitLabConfig holds webhook authentication settings.
+// GitLabConfig identifies the GitLab instance and authenticates webhooks.
 type GitLabConfig struct {
+	// Host is the GitLab domain repositories live on (e.g.
+	// "code.zmatrix.cn"). Plain domain or full URL both work; only events
+	// whose clone URL belongs to this host are accepted — everything else
+	// from a valid secret is rejected as host_not_allowed.
+	Host          string `yaml:"host"`
 	WebhookSecret string `yaml:"webhook_secret"`
 }
 
-// Repository describes one buildable Git repository.
-type Repository struct {
-	Name          string    `yaml:"name"`
-	URL           string    `yaml:"url"`
-	Branches      []string  `yaml:"branches"`
-	BranchRegex   string    `yaml:"branch_regex"`
-	DeployKeyPath string    `yaml:"deploy_key_path"`
-	Build         BuildSpec `yaml:"build"`
+// BuildConfig holds the global build defaults applied to every triggered
+// repository; per-repo overrides do not exist.
+type BuildConfig struct {
+	Branches      []string          `yaml:"branches"`
+	BranchRegex   string            `yaml:"branch_regex"`
+	ImagePrefix   string            `yaml:"image_prefix"`
+	Dockerfile    string            `yaml:"dockerfile"` // "auto" (default) | template name | repo path
+	Context       string            `yaml:"context"`
+	DeployKeyPath string            `yaml:"deploy_key_path"`
+	Args          map[string]string `yaml:"args"`
+	TagLatest     bool              `yaml:"tag_latest"`
+	NoCache       bool              `yaml:"no_cache"`
 }
 
-// BuildSpec describes how to build one repository.
+// ImageFor derives the local image name from a project's path_with_namespace,
+// sanitised to characters Docker accepts as a repository name.
+func (b BuildConfig) ImageFor(pathWithNamespace string) string {
+	sanitised := invalidImageChars.ReplaceAllString(strings.ToLower(pathWithNamespace), "-")
+	sanitised = strings.Trim(sanitised, "/")
+	if sanitised == "" {
+		sanitised = "unnamed-repo"
+	}
+	prefix := strings.TrimSuffix(b.ImagePrefix, "/")
+	if prefix == "" {
+		return sanitised
+	}
+	return strings.ToLower(prefix) + "/" + sanitised
+}
+
+var invalidImageChars = regexp.MustCompile(`[^a-z0-9._/-]+`)
+
+// Repository is the runtime view of one build job, derived from the webhook
+// event plus the global build config. It is never parsed from YAML.
+type Repository struct {
+	Name          string
+	URL           string
+	Branches      []string
+	BranchRegex   string
+	DeployKeyPath string
+	Build         BuildSpec
+}
+
+// BuildSpec is the runtime build description handed to the builder.
 type BuildSpec struct {
-	Type       string            `yaml:"type"`
-	Context    string            `yaml:"context"`
-	Dockerfile string            `yaml:"dockerfile"`
-	Image      string            `yaml:"image"`
-	Args       map[string]string `yaml:"args"`
-	TagLatest  bool              `yaml:"tag_latest"`
-	NoCache    bool              `yaml:"no_cache"`
+	Context    string
+	Dockerfile string
+	Image      string
+	Args       map[string]string
+	TagLatest  bool
+	NoCache    bool
 }
 
 var envPattern = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
@@ -122,14 +160,17 @@ func (c *Config) applyDefaults() {
 	if c.Server.Concurrency <= 0 {
 		c.Server.Concurrency = 2
 	}
-	for i := range c.Repositories {
-		r := &c.Repositories[i]
-		if r.Build.Context == "" {
-			r.Build.Context = "."
-		}
-		if r.Build.Dockerfile == "" {
-			r.Build.Dockerfile = "Dockerfile"
-		}
+	if len(c.Build.Branches) == 0 {
+		c.Build.Branches = []string{"main", "master"}
+	}
+	if c.Build.BranchRegex == "" {
+		c.Build.BranchRegex = ".*"
+	}
+	if c.Build.Dockerfile == "" {
+		c.Build.Dockerfile = "auto"
+	}
+	if c.Build.Context == "" {
+		c.Build.Context = "."
 	}
 }
 
@@ -143,34 +184,11 @@ func (c Config) validate() error {
 	if c.Server.QueueSize < 1 {
 		return fmt.Errorf("config: server.queue_size must be >= 1")
 	}
-	if len(c.Repositories) == 0 {
-		return fmt.Errorf("config: at least one repository is required")
+	if strings.TrimSpace(c.GitLab.Host) == "" {
+		return fmt.Errorf("config: gitlab.host is required (the GitLab domain, e.g. code.zmatrix.cn)")
 	}
-	seen := make(map[string]struct{}, len(c.Repositories))
-	for _, r := range c.Repositories {
-		if r.Name == "" {
-			return fmt.Errorf("config: repository name must not be empty")
-		}
-		if _, dup := seen[r.Name]; dup {
-			return fmt.Errorf("config: duplicate repository name %q", r.Name)
-		}
-		seen[r.Name] = struct{}{}
-		if r.URL == "" {
-			return fmt.Errorf("config: repository %q: url is required", r.Name)
-		}
-		if r.Build.Image == "" {
-			return fmt.Errorf("config: repository %q: build.image is required", r.Name)
-		}
-		if len(r.Branches) == 0 {
-			return fmt.Errorf("config: repository %q: at least one trigger branch is required", r.Name)
-		}
-		pattern := r.BranchRegex
-		if pattern == "" {
-			pattern = ".*"
-		}
-		if _, err := regexp.Compile(pattern); err != nil {
-			return fmt.Errorf("config: repository %q: invalid branch_regex %q: %w", r.Name, r.BranchRegex, err)
-		}
+	if _, err := regexp.Compile(c.Build.BranchRegex); err != nil {
+		return fmt.Errorf("config: build.branch_regex %q: %w", c.Build.BranchRegex, err)
 	}
 	return nil
 }

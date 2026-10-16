@@ -1,6 +1,7 @@
 package builder
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -15,13 +16,21 @@ import (
 const generatedDockerfileName = ".gitlab-builder.Dockerfile"
 
 // ResolveDockerfile decides which Dockerfile to build for the repo at repoDir.
-// When spec.Dockerfile names a built-in template, the template is
-// materialised into the context; otherwise spec.Dockerfile is treated as a
-// repo-relative path. Returns the Dockerfile path and the effective context.
+// spec.Dockerfile "auto" prefers the repo's own root Dockerfile and otherwise
+// detects a built-in template from language markers. When spec.Dockerfile
+// names a built-in template, the template is materialised into the context;
+// otherwise it is treated as a repo-relative path. Returns the Dockerfile
+// path and the effective context.
 func ResolveDockerfile(_ context.Context, repoDir string, spec config.BuildSpec) (dockerfilePath, effectiveContext string, err error) {
 	contextDir := filepath.Join(repoDir, spec.Context)
-	if templates.Has(spec.Dockerfile) {
-		content, err := templates.Get(spec.Dockerfile)
+	name := spec.Dockerfile
+	if name == "auto" {
+		if name, err = detectDockerfile(repoDir); err != nil {
+			return "", "", err
+		}
+	}
+	if templates.Has(name) {
+		content, err := templates.Get(name)
 		if err != nil {
 			return "", "", err
 		}
@@ -35,9 +44,49 @@ func ResolveDockerfile(_ context.Context, repoDir string, spec config.BuildSpec)
 		return out, contextDir, nil
 	}
 
-	abs := filepath.Join(repoDir, spec.Dockerfile)
+	abs := filepath.Join(repoDir, name)
 	if _, err := os.Stat(abs); err != nil {
-		return "", "", fmt.Errorf("dockerfile not found: %s (repo has no such file and it is not a built-in template %v)", spec.Dockerfile, templates.Names())
+		return "", "", fmt.Errorf("dockerfile not found: %s (repo has no such file and it is not a built-in template %v)", name, templates.Names())
 	}
 	return abs, contextDir, nil
+}
+
+// detectDockerfile resolves dockerfile: auto for one repository. The repo's
+// own root Dockerfile always wins; otherwise the first matching language
+// marker selects a built-in template: go.mod → Go, Maven/Gradle → Java,
+// package.json → Vue when it depends on "vue", else Node.
+func detectDockerfile(repoDir string) (string, error) {
+	if fileExists(filepath.Join(repoDir, "Dockerfile")) {
+		return "Dockerfile", nil
+	}
+	switch {
+	case fileExists(filepath.Join(repoDir, "go.mod")):
+		return "go.Dockerfile", nil
+	case fileExists(filepath.Join(repoDir, "pom.xml")),
+		fileExists(filepath.Join(repoDir, "build.gradle")),
+		fileExists(filepath.Join(repoDir, "build.gradle.kts")):
+		return "java.Dockerfile", nil
+	case fileExists(filepath.Join(repoDir, "package.json")):
+		if packageJSONHasVue(filepath.Join(repoDir, "package.json")) {
+			return "vue.Dockerfile", nil
+		}
+		return "node.Dockerfile", nil
+	}
+	return "", fmt.Errorf("dockerfile auto detection failed: repo root has no Dockerfile, go.mod, pom.xml, build.gradle, or package.json; set build.dockerfile explicitly")
+}
+
+func fileExists(path string) bool {
+	st, err := os.Stat(path)
+	return err == nil && !st.IsDir()
+}
+
+// packageJSONHasVue reports whether package.json mentions "vue" as a JSON key
+// (dependency or devDependency). Good enough to split vue.Dockerfile from
+// node.Dockerfile; mixed repos should set build.dockerfile explicitly.
+func packageJSONHasVue(path string) bool {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	return bytes.Contains(b, []byte(`"vue"`))
 }

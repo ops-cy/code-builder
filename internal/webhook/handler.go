@@ -24,7 +24,8 @@ const maxBodyBytes = 1 << 20 // 1 MiB
 
 // Deps groups the handler's dependencies.
 type Deps struct {
-	Repos     []config.Repository
+	Host      string
+	Build     config.BuildConfig
 	Secret    string
 	Store     *store.Store
 	Queue     *queue.Queue
@@ -69,12 +70,13 @@ func Handler(deps Deps) gin.HandlerFunc {
 			return
 		}
 
-		repo, found := MatchRepo(deps.Repos, ev.Project.GitSSHURL, ev.Project.GitHTTPURL)
-		if !found {
-			logger.InfoContext(c.Request.Context(), "webhook: unmatched repository",
+		repo, reason := deriveRepository(deps.Host, deps.Build, ev)
+		if reason != "" {
+			logger.InfoContext(c.Request.Context(), "webhook: event rejected",
+				slog.String("reason", reason),
 				slog.String("ssh_url", ev.Project.GitSSHURL),
 				slog.String("http_url", ev.Project.GitHTTPURL))
-			c.JSON(http.StatusAccepted, gin.H{"status": "unmatched"})
+			c.JSON(http.StatusAccepted, gin.H{"status": reason, "branch": branch})
 			return
 		}
 		if !repo.BranchMatches(branch) {

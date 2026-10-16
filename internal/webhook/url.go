@@ -1,23 +1,6 @@
 package webhook
 
-import (
-	"strings"
-
-	"gitlab-builder/internal/config"
-)
-
-// MatchRepo finds the configured repository matching the event's project
-// URLs (SSH or HTTP). Both sides are normalised to host[:port]/path form and
-// compared with a case-insensitive host part.
-func MatchRepo(repos []config.Repository, sshURL, httpURL string) (config.Repository, bool) {
-	for _, r := range repos {
-		norm := normalizeGitURL(r.URL)
-		if norm != "" && (norm == normalizeGitURL(sshURL) || norm == normalizeGitURL(httpURL)) {
-			return r, true
-		}
-	}
-	return config.Repository{}, false
-}
+import "strings"
 
 // normalizeGitURL reduces a git remote URL to "host[:port]/path" form:
 // strips known schemes and the "git@" user, drops a ".git" suffix, and
@@ -62,4 +45,33 @@ func isAllDigits(s string) bool {
 		}
 	}
 	return true
+}
+
+// hostOf extracts the lowercased, port-less host from a git remote URL or a
+// bare/URL-shaped configured host, via normalizeGitURL's "host[:port]/path"
+// form. IPv6 literals are out of scope: configuration entries are plain
+// hostnames or http(s) URLs.
+func hostOf(rawURL string) string {
+	n := normalizeGitURL(rawURL)
+	if n == "" {
+		return ""
+	}
+	hostport := n
+	if i := strings.IndexByte(n, '/'); i >= 0 {
+		hostport = n[:i]
+	}
+	if i := strings.IndexByte(hostport, ':'); i >= 0 {
+		hostport = hostport[:i]
+	}
+	return strings.ToLower(hostport)
+}
+
+// hostMatches reports whether the event URL's host equals the configured
+// GitLab host. Ports are ignored on both sides: git SSH on :20022 still
+// matches the plain domain, and the config may be "code.zmatrix.cn" or
+// "https://code.zmatrix.cn".
+func hostMatches(configuredHost, rawURL string) bool {
+	want := hostOf(configuredHost)
+	got := hostOf(rawURL)
+	return want != "" && want == got
 }

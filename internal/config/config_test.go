@@ -22,13 +22,8 @@ func Test_Load_when_ValidYAMLWithEnvExpansion_thenReturnExpandedConfig(t *testin
 server:
   listen: ":9090"
 gitlab:
+  host: "example.com"
   webhook_secret: "${TEST_WEBHOOK_SECRET}"
-repositories:
-  - name: app
-    url: "ssh://git@example.com/g/app.git"
-    branches: ["main"]
-    build:
-      image: "local/app"
 `)
 
 	// When
@@ -41,6 +36,9 @@ repositories:
 	if cfg.GitLab.WebhookSecret != "s3cret" {
 		t.Errorf("WebhookSecret = %q, want s3cret", cfg.GitLab.WebhookSecret)
 	}
+	if cfg.GitLab.Host != "example.com" {
+		t.Errorf("Host = %q, want example.com", cfg.GitLab.Host)
+	}
 	if cfg.Server.Listen != ":9090" {
 		t.Errorf("Listen = %q, want :9090", cfg.Server.Listen)
 	}
@@ -50,8 +48,8 @@ repositories:
 	if cfg.Server.Workspace != "/app/workspace" || cfg.Server.LogsDir != "/app/logs" {
 		t.Errorf("workspace defaults not applied: %+v", cfg.Server)
 	}
-	if cfg.Repositories[0].Build.Context != "." || cfg.Repositories[0].Build.Dockerfile != "Dockerfile" {
-		t.Errorf("build defaults not applied: %+v", cfg.Repositories[0].Build)
+	if cfg.Build.Context != "." || cfg.Build.Dockerfile != "auto" {
+		t.Errorf("build defaults not applied: %+v", cfg.Build)
 	}
 }
 
@@ -61,13 +59,8 @@ func Test_Load_when_CommentMentionsPlaceholder_ThenNotExpanded(t *testing.T) {
 	path := writeConfig(t, `
 # ${VAR} is documented here and must not be expanded.
 gitlab:
+  host: "example.com"
   webhook_secret: "${TEST_WEBHOOK_SECRET}"
-repositories:
-  - name: app
-    url: "ssh://git@example.com/g/app.git"
-    branches: ["main"]
-    build:
-      image: "local/app"
 `)
 
 	// When
@@ -86,13 +79,8 @@ func Test_Load_when_UnsetEnvVar_thenReturnError(t *testing.T) {
 	// Given
 	path := writeConfig(t, `
 gitlab:
+  host: "example.com"
   webhook_secret: "${DEFINITELY_NOT_SET_VAR_XYZ}"
-repositories:
-  - name: app
-    url: "ssh://git@example.com/g/app.git"
-    branches: ["main"]
-    build:
-      image: "local/app"
 `)
 
 	// When
@@ -108,13 +96,8 @@ func Test_Load_when_MissingSecret_thenReturnError(t *testing.T) {
 	// Given
 	path := writeConfig(t, `
 gitlab:
+  host: "example.com"
   webhook_secret: ""
-repositories:
-  - name: app
-    url: "ssh://git@example.com/g/app.git"
-    branches: ["main"]
-    build:
-      image: "local/app"
 `)
 
 	// When
@@ -126,45 +109,14 @@ repositories:
 	}
 }
 
-func Test_Load_when_DuplicateRepoName_thenReturnError(t *testing.T) {
-	// Given
-	path := writeConfig(t, `
-gitlab:
-  webhook_secret: "x"
-repositories:
-  - name: app
-    url: "ssh://git@example.com/g/app.git"
-    branches: ["main"]
-    build:
-      image: "local/app"
-  - name: app
-    url: "ssh://git@example.com/g/app2.git"
-    branches: ["main"]
-    build:
-      image: "local/app2"
-`)
-
-	// When
-	_, err := Load(path)
-
-	// Then
-	if err == nil {
-		t.Fatal("Load() error = nil, want duplicate name error")
-	}
-}
-
 func Test_Load_when_InvalidBranchRegex_thenReturnError(t *testing.T) {
 	// Given
 	path := writeConfig(t, `
 gitlab:
+  host: "example.com"
   webhook_secret: "x"
-repositories:
-  - name: app
-    url: "ssh://git@example.com/g/app.git"
-    branches: ["main"]
-    branch_regex: "(["
-    build:
-      image: "local/app"
+build:
+  branch_regex: "(["
 `)
 
 	// When
@@ -176,12 +128,11 @@ repositories:
 	}
 }
 
-func Test_Load_when_NoRepositories_thenReturnError(t *testing.T) {
+func Test_Load_when_MissingHost_thenReturnError(t *testing.T) {
 	// Given
 	path := writeConfig(t, `
 gitlab:
   webhook_secret: "x"
-repositories: []
 `)
 
 	// When
@@ -189,6 +140,6 @@ repositories: []
 
 	// Then
 	if err == nil {
-		t.Fatal("Load() error = nil, want repositories required error")
+		t.Fatal("Load() error = nil, want gitlab.host required error")
 	}
 }

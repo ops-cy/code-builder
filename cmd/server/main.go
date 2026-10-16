@@ -42,7 +42,8 @@ func main() {
 	go q.Start(ctx)
 
 	deps := webhook.Deps{
-		Repos:     cfg.Repositories,
+		Host:      cfg.GitLab.Host,
+		Build:     cfg.Build,
 		Secret:    cfg.GitLab.WebhookSecret,
 		Store:     st,
 		Queue:     q,

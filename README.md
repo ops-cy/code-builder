@@ -4,10 +4,11 @@ GitLab Webhook 触发的**本地 Docker 镜像自动构建服务**。Push 代码
 
 ## 特性
 
+- **无需登记仓库**：配置只需 GitLab 域名（`gitlab.host`），任何挂在该域名下的项目把 Webhook 指向本服务，Push 即触发；仓库地址、分支、Commit 全部取自事件数据
 - **仅本地构建**：镜像只存在于构建机的 Docker 守护进程中，不 push
 - **Docker Socket 构建**：服务容器通过挂载 `/var/run/docker.sock` 调用宿主机 `docker build`
-- **SSH Deploy Key**：每个仓库可用独立只读 Deploy Key 拉取代码
-- **双重分支过滤**：正则门槛（`branch_regex`）+ 指定分支白名单（`branches`，支持 `release/*` 通配）
+- **SSH Deploy Key**：一把全局只读 Deploy Key 拉取该 GitLab 实例下所有被触发仓库
+- **双重分支过滤**：全局正则门槛（`build.branch_regex`）+ 分支白名单（`build.branches`，支持 `release/*` 通配）
 - **Commit SHA 精确构建**：按 webhook 推送的 `checkout_sha` 精确 checkout，标签含短 SHA
 - **任务队列**：全局并发可配；**同一仓库串行、不同仓库并行**
 - **Webhook Secret 校验**：`X-Gitlab-Token` 恒定时比较，常数时间防时序攻击
@@ -31,13 +32,14 @@ flowchart LR
 ## 快速开始
 
 ```bash
-# 1. 准备 Deploy Key（每个私有仓库一把，只读）
+# 1. 准备 Deploy Key（一把全局只读 key，添加到所有被构建项目）
 mkdir -p secrets && chmod 700 secrets
-ssh-keygen -t ed25519 -f ./secrets/backend-api_deploy_key -N ""
-# 公钥添加到 GitLab：项目 → Settings → Repository → Deploy Keys（勾选 Read-only）
+ssh-keygen -t ed25519 -f ./secrets/gitlab_deploy_key -N ""
+# 公钥添加到 GitLab 各项目：Settings → Repository → Deploy Keys（勾选 Read-only）
 
 # 2. 配置
-#    编辑 config/config.yaml（各字段有中文注释）
+#    编辑 config/config.yaml：gitlab.host 填仓库所在域名（如 code.zmatrix.cn），
+#    其余为全局 build 配置（各字段有中文注释）
 export GITLAB_WEBHOOK_SECRET="$(openssl rand -hex 32)"
 
 # 3. 启动
@@ -68,7 +70,8 @@ Webhook 响应状态：
 |---|---|
 | 202 `{"status":"queued","build_id":...}` | 已入队 |
 | 202 `{"status":"ignored"}` | 非 Push / 删除事件 / 非分支 ref |
-| 202 `{"status":"unmatched"}` | URL 不匹配任何已配置仓库 |
+| 202 `{"status":"host_not_allowed"}` | 事件仓库地址不属于 `gitlab.host` 域名 |
+| 202 `{"status":"missing_repo_url"}` | 事件缺少仓库地址字段（异常 payload） |
 | 202 `{"status":"branch_filtered"}` | 分支未通过正则或白名单 |
 | 401 | Secret 校验失败 |
 | 400 | 请求体非法或过大 |
@@ -76,14 +79,15 @@ Webhook 响应状态：
 
 ## 镜像标签规则
 
-推送 `main` 分支、commit `abcdef1234567890...`、镜像名 `business-api` 时：
+镜像名 = 项目路径（`path_with_namespace`，可加 `build.image_prefix` 前缀）。
+推送 `main` 分支、commit `abcdef1234567890...`、项目 `jmatrix/atlas-backend-api` 时：
 
 ```
-business-api:main-abcdef123456
-business-api:latest          # 仅当该仓库配置 tag_latest: true
+jmatrix/atlas-backend-api:main-abcdef123456
+jmatrix/atlas-backend-api:latest    # 仅当 build.tag_latest: true
 ```
 
-分支 `release/1.2` → `business-api:release-1.2-<短SHA>`（`/` 自动转 `-`）。
+分支 `release/1.2` → `jmatrix/atlas-backend-api:release-1.2-<短SHA>`（`/` 自动转 `-`）。
 
 ## 配置
 
@@ -98,7 +102,7 @@ business-api:latest          # 仅当该仓库配置 tag_latest: true
 | `vue.Dockerfile` | Vue / Vite 前端 | 构建产物交给 nginx 托管 |
 | `java.Dockerfile` | Maven + JDK 21 | `mvn package`，JRE 运行时 |
 
-仓库根目录自有 `Dockerfile` 时，将 `build.dockerfile` 设为 `Dockerfile` 即使用仓库内文件；设为模板名则使用内置模板。
+默认 `build.dockerfile: auto`：仓库根目录自有 `Dockerfile` 时直接使用，否则按语言标记自动选模板（`go.mod`→Go、`pom.xml`/`build.gradle`→Java、`package.json`→Node，声明了 `vue` 依赖→Vue）；也可全局指定模板名或仓库内路径强制覆盖。
 
 ## 文档
 

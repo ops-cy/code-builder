@@ -32,7 +32,13 @@ func testRepo() config.Repository {
 func newTestDeps(t *testing.T, q *queue.Queue) Deps {
 	t.Helper()
 	return Deps{
-		Repos:     []config.Repository{testRepo()},
+		Host: "example.com",
+		Build: config.BuildConfig{
+			Branches:    []string{"main"},
+			BranchRegex: ".*",
+			Dockerfile:  "auto",
+			Context:     ".",
+		},
 		Secret:    testSecret,
 		Store:     store.New(t.TempDir()),
 		Queue:     q,
@@ -162,13 +168,13 @@ func Test_Webhook_when_DeletePush_thenReturn202Ignored(t *testing.T) {
 	}
 }
 
-func Test_Webhook_when_UnmatchedRepo_thenReturn202Unmatched(t *testing.T) {
+func Test_Webhook_when_WrongHost_thenReturn202HostNotAllowed(t *testing.T) {
 	// Given
 	r := newRouter(newTestDeps(t, queue.New(1, 10)))
 	ev := basePushEvent()
 	proj := ev["project"].(map[string]any)
-	proj["git_ssh_url"] = "ssh://git@example.com:20022/other/repo.git"
-	proj["git_http_url"] = "https://example.com/other/repo.git"
+	proj["git_ssh_url"] = "ssh://git@evil.example.org:20022/other/repo.git"
+	proj["git_http_url"] = "https://evil.example.org/other/repo.git"
 
 	// When
 	w := doWebhook(r, testSecret, pushBody(t, ev))
@@ -177,8 +183,8 @@ func Test_Webhook_when_UnmatchedRepo_thenReturn202Unmatched(t *testing.T) {
 	if w.Code != http.StatusAccepted {
 		t.Errorf("status = %d, want 202", w.Code)
 	}
-	if !strings.Contains(w.Body.String(), "unmatched") {
-		t.Errorf("body = %s, want unmatched", w.Body.String())
+	if !strings.Contains(w.Body.String(), "host_not_allowed") {
+		t.Errorf("body = %s, want host_not_allowed", w.Body.String())
 	}
 }
 

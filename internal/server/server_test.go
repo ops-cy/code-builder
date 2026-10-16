@@ -26,7 +26,6 @@ func newTestServer(t *testing.T) (*Server, *store.Store) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	st := store.New(t.TempDir())
 	deps := webhook.Deps{
-		Repos:     nil,
 		Secret:    "x",
 		Store:     st,
 		Queue:     queue.New(1, 1),
