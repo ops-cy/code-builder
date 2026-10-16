@@ -4,8 +4,8 @@ GitLab Webhook 触发的**通用 Docker 镜像自动构建服务**。任何挂�
 
 ## 特性
 
-- **无需登记仓库**：配置只有 `server` 与 `code` 两段，不维护仓库列表；唯一准入条件是事件中的仓库地址属于 `code.domain`
-- **仅本地构建**：镜像只存在于构建机的 Docker 守护进程中，不 push
+- **无需登记仓库**：配置只有 `server`、`code` 与可选的 `registry`，不维护仓库列表；唯一准入条件是事件中的仓库地址属于 `code.domain`
+- **默认仅本地构建，可选推送**：不配置 `registry.url` 时镜像只留在构建机；配置后构建成功自动打远程 tag 并 push（`docker login` + `docker push`）
 - **Docker Socket 构建**：服务容器通过挂载 `/var/run/docker.sock` 调用宿主机 `docker build`
 - **SSH Deploy Key**：一把全局只读 Deploy Key（经 `GITLAB_DEPLOY_KEY_PATH` 环境变量注入）拉取该 GitLab 实例下所有被触发仓库
 - **分支白名单**：`code.branches` 精确匹配（默认 `main`、`master`）
@@ -13,7 +13,7 @@ GitLab Webhook 触发的**通用 Docker 镜像自动构建服务**。任何挂�
 - **任务队列**：全局并发可配；**同一仓库（按归一化 URL）串行、不同仓库并行**
 - **重复投递去重**：同一仓库的同一 Commit 在排队/构建期间不会重复入队，重发返回 `duplicate`
 - **Webhook Secret 校验**：`X-Gitlab-Token` 恒定时比较，常数时间防时序攻击
-- **仓库自带 Dockerfile 优先，内置模板兜底**：有 `Dockerfile` 就用；没有时按语言标记（Go / Node / Vue / Java / Gradle）套用内置模板并调用内置构建脚本（`build-go` / `build-maven` / `build-node`），两类都没有才明确报错
+- **仓库自带 Dockerfile 优先，内置模板兜底**：有 `Dockerfile` 就用（绝不覆盖）；没有时按语言标记（Go / Node / Vue / Java / Gradle / Python / PHP）套用内置模板并调用内置构建脚本（`build-go` / `build-maven` / `build-node` / `build-python` / `build-php`），两类都没有才明确报错
 - **构建日志**：每次构建的完整 git + docker 输出落盘，可经 API 查询；URL 凭据全程脱敏
 - **防泄漏与超时**：SSH 主机密钥 `accept-new`（首次 TOFU、之后拒绝变更）；clone 15 分钟 / docker build 25 分钟 / 单任务 30 分钟超时兜底
 
@@ -26,7 +26,8 @@ flowchart LR
     Q --> B[Builder 流水线]
     B -->|git clone + checkout SHA<br/>SSH Deploy Key| GC[构建工作区]
     B -->|docker build -t image:sha8| DK[Docker 守护进程<br/>via /var/run/docker.sock]
-    DK --> IMG[本地镜像<br/>不推送 Registry]
+    DK --> IMG[本地镜像<br/>image:sha8]
+    B -.->|registry.url 已配置<br/>docker login + push| REG[镜像仓库<br/>可选]
     B --> L[构建日志<br/>/app/logs/&lt;build_id&gt;.log]
 ```
 
@@ -62,6 +63,7 @@ curl http://<构建机IP>:8080/api/builds
 |---|---|---|
 | `GITLAB_WEBHOOK_SECRET` | 是 | Webhook Secret，与 GitLab 侧一致；未设置时启动失败 |
 | `GITLAB_DEPLOY_KEY_PATH` | 否 | 全局 SSH Deploy Key 私钥路径（容器内路径）；设置但文件不可读则启动失败 |
+| `REGISTRY_PASSWORD` | 否 | 供 `registry.password` 用 `${...}` 引用的镜像仓库密码；仅当配置了推送时需要 |
 | `LOG_LEVEL` | 否 | `debug` / `info`（默认）/ `warn` / `error` |
 
 ## API
@@ -92,16 +94,18 @@ Webhook 响应状态：
 
 - **镜像名** = 仓库名（事件 `project.name`，转小写并规整为 Docker 合法字符 `[a-z0-9._-]`；URL 末段兜底）。不同仓库撞名时追加 `-<哈希8位>` 稳定后缀，不同项目绝不共享同一镜像名。
 - **标签** = Commit SHA 前 8 位，不附加分支名，不生成 `latest`。
+- **推送**（仅当 `registry.url` 非空）= 在本地 tag 之外再打一个远程 tag `<url>[/<project>]/<镜像名>:<sha8>` 并 `docker push`。
 
 推送 `main` 分支、commit `a1b2c3d4e5f6...`、项目 `Backend-API` 时：
 
 ```
-backend-api:a1b2c3d4
+backend-api:a1b2c3d4                              # 本地（始终）
+registry.example.com/tenants/backend-api:a1b2c3d4 # 远程（配置 registry.url 后）
 ```
 
 ## 配置
 
-配置文件只有 `server` 与 `code` 两段，全部字段与中文注释见 [`config/config.yaml`](config/config.yaml)：
+配置文件有 `server`、`code` 两段与可选的 `registry` 段，全部字段与中文注释见 [`config/config.yaml`](config/config.yaml)：
 
 ```yaml
 server:
@@ -115,6 +119,13 @@ code:
   webhook_secret: "${GITLAB_WEBHOOK_SECRET}"
   domain: "code.gitlab.com"
   branches: ["main", "master"]
+
+# 可选；省略或不填 url = 仅本地构建（默认）
+registry:
+  url: ""            # 填了才推送，例: registry.example.com
+  project: ""        # 可选镜像名前缀，例: tenants
+  username: ""       # 与 password 成对出现；都填则推送前 docker login
+  password: ""       # 建议用 ${REGISTRY_PASSWORD} 环境变量注入
 ```
 
 ## 构建文件选择
@@ -131,24 +142,29 @@ code:
 | `gradle` | `build.gradle` / `build.gradle.kts` | 无脚本 | `gradle bootJar`（否则 `build`）→ JRE 21 |
 | `vue` | `package.json`（含 `vue` / `nuxt` / `@vue/*` 依赖） | `build-node.sh lts npm` | Node 构建产物 → nginx 托管 |
 | `node` | `package.json`（无 Vue 依赖） | `build-node.sh lts npm` | Node 构建 → 非 root 运行，入口 `dist/index.js` |
+| `python` | `requirements.txt` / `Pipfile` / `pyproject.toml` | `build-python.sh` | 依赖装入运行镜像 → `python main.py`（根目录 `main.py`） |
+| `php` | `composer.json` | `build-php.sh` | `composer install --no-dev` → PHP 内置服务器托管 `public/`（:8000） |
 
 3. **两者都没有**：既无 `Dockerfile` 也无识别到的语言标记时，构建以 `no Dockerfile at repository root and no built-in template matched` 明确失败（不猜测、不生成空模板）。
 
 ### 内置构建脚本
 
-三个脚本内嵌在服务二进制中（源码 `internal/templates/scripts/`），按所选模板写入 `.gitlab-builder/build.sh` 供构建阶段调用：
+脚本内嵌在服务二进制中（源码 `internal/templates/scripts/`），按所选模板写入 `.gitlab-builder/build.sh` 供构建阶段调用：
 
 - **`build-go.sh <cgo-enabled>`**：`go mod tidy` 后 `GOOS=linux GOARCH=amd64 CGO_ENABLED=$1 go build -buildvcs=false -o app -trimpath .`（构建**根包**，产物 `app`）。
 - **`build-maven.sh <java-version>`**：有 SDKMAN 则用其切换 Java/Maven（否则 WARN 降级用系统工具）；`mvn clean package -DskipTests` 后取**主 jar**（跳过 `-sources` / `-javadoc` / `-plain`）复制为 `app.jar`。
 - **`build-node.sh <node-version> <package-manager>`**：有 Volta 则用其切换 Node（否则 WARN 降级用系统 Node）；按 `npm` / `pnpm` / `yarn` 安装依赖并执行项目 `build`。
+- **`build-python.sh`**：优先 `requirements.txt`（`pip install -r`），其次 `Pipfile`（`pipenv install --system`），再次 `pyproject.toml`（`pip install .`）；与 Jenkins 共享库 `PythonBuilder` 语义一致。
+- **`build-php.sh`**：存在 `composer.json` 时执行 `composer install --no-dev --optimize-autoloader`；与 Jenkins 共享库 `PhpBuilder` 语义一致。
 
-参数由模板写死为约定默认值（`cgo=0`、`java=21`、`node=lts`、`pm=npm`）。脚本对 SDKMAN / Volta **优雅降级**：官方镜像里没有版本管理器时自动改用镜像自带工具链。
+参数由模板写死为约定默认值（`cgo=0`、`java=21`、`node=lts`、`pm=npm`；Python / PHP 无参数）。脚本对 SDKMAN / Volta **优雅降级**：官方镜像里没有版本管理器时自动改用镜像自带工具链。
 
 注意：
 
-- 约定入口/产物（Go 根包 `app`、Node 入口 `dist/index.js`）不符时，请在仓库根目录提供自己的 `Dockerfile` 覆盖模板；
+- 约定入口/产物（Go 根包 `app`、Node 入口 `dist/index.js`、Python 入口根目录 `main.py`、PHP 入口 `public/`）不符时，请在仓库根目录提供自己的 `Dockerfile` 覆盖模板；
 - `.gitlab-builder/` 属构建上下文，**请勿**在仓库 `.dockerignore` 中排除；
-- 每次构建日志会写明来源与路径：`==> dockerfile source=repository|template:<name> path=...`。
+- 每次构建日志会写明来源与路径：`==> dockerfile source=repository|template:<name> path=...`；
+- 配置 `registry.url` 后，构建成功会打印 `==> registry push enabled remote=...` 并执行 `docker login` + `docker push`；推送失败即构建失败（镜像已本地保留）。
 
 ## 文档
 

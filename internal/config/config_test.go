@@ -173,3 +173,115 @@ code:
 		t.Fatal("Load() error = nil, want empty branch entry error")
 	}
 }
+
+func Test_Load_when_RegistryConfigured_thenEnabledWithRemoteRef(t *testing.T) {
+	// Given
+	t.Setenv("TEST_REGISTRY_PASSWORD", "p@ss")
+	path := writeConfig(t, `
+code:
+  webhook_secret: "x"
+  domain: "example.com"
+registry:
+  url: "registry.example.com"
+  project: "tenants"
+  username: "ci"
+  password: "${TEST_REGISTRY_PASSWORD}"
+`)
+
+	// When
+	cfg, err := Load(path)
+
+	// Then
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !cfg.Registry.Enabled() {
+		t.Fatal("Registry.Enabled() = false, want true when url is set")
+	}
+	if cfg.Registry.Password != "p@ss" {
+		t.Errorf("Registry.Password = %q, want expanded env value", cfg.Registry.Password)
+	}
+	if got, want := cfg.Registry.RemoteRef("app", "a1b2c3d4"), "registry.example.com/tenants/app:a1b2c3d4"; got != want {
+		t.Errorf("RemoteRef() = %q, want %q", got, want)
+	}
+}
+
+func Test_Load_when_RegistryOmitted_thenDisabled(t *testing.T) {
+	// Given
+	path := writeConfig(t, `
+code:
+  webhook_secret: "x"
+  domain: "example.com"
+`)
+
+	// When
+	cfg, err := Load(path)
+
+	// Then
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Registry.Enabled() {
+		t.Error("Registry.Enabled() = true, want false when section omitted")
+	}
+}
+
+func Test_Load_when_RegistryUsernameWithoutPassword_thenReturnError(t *testing.T) {
+	// Given
+	path := writeConfig(t, `
+code:
+  webhook_secret: "x"
+  domain: "example.com"
+registry:
+  url: "registry.example.com"
+  username: "ci"
+`)
+
+	// When
+	_, err := Load(path)
+
+	// Then
+	if err == nil {
+		t.Fatal("Load() error = nil, want username/password pairing error")
+	}
+}
+
+func Test_Load_when_RegistryPasswordWithoutUsername_thenReturnError(t *testing.T) {
+	// Given
+	path := writeConfig(t, `
+code:
+  webhook_secret: "x"
+  domain: "example.com"
+registry:
+  url: "registry.example.com"
+  password: "p@ss"
+`)
+
+	// When
+	_, err := Load(path)
+
+	// Then
+	if err == nil {
+		t.Fatal("Load() error = nil, want username/password pairing error")
+	}
+}
+
+func Test_Load_when_RegistryCredsWithoutURL_thenReturnError(t *testing.T) {
+	// Given: credentials are meaningless without a push target.
+	path := writeConfig(t, `
+code:
+  webhook_secret: "x"
+  domain: "example.com"
+registry:
+  username: "ci"
+  password: "p@ss"
+`)
+
+	// When
+	_, err := Load(path)
+
+	// Then
+	if err == nil {
+		t.Fatal("Load() error = nil, want creds-without-url error")
+	}
+}

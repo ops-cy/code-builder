@@ -32,6 +32,12 @@ func TestDetect(t *testing.T) {
 		{name: "nuxt", files: map[string]string{"package.json": `{"dependencies":{"nuxt":"^3"}}`}, want: NameVue, ok: true},
 		{name: "go wins over node", files: map[string]string{"go.mod": "module x", "package.json": `{"dependencies":{"vue":"^3"}}`}, want: NameGo, ok: true},
 		{name: "unparseable package.json falls back to node", files: map[string]string{"package.json": "not json"}, want: NameNode, ok: true},
+		{name: "python requirements.txt", files: map[string]string{"requirements.txt": "flask"}, want: NamePython, ok: true},
+		{name: "python Pipfile", files: map[string]string{"Pipfile": "[packages]"}, want: NamePython, ok: true},
+		{name: "python pyproject.toml", files: map[string]string{"pyproject.toml": "[project]"}, want: NamePython, ok: true},
+		{name: "php composer.json", files: map[string]string{"composer.json": "{}"}, want: NamePhp, ok: true},
+		{name: "go wins over python", files: map[string]string{"go.mod": "module x", "requirements.txt": "flask"}, want: NameGo, ok: true},
+		{name: "node wins over python", files: map[string]string{"package.json": `{"dependencies":{}}`, "requirements.txt": "flask"}, want: NameNode, ok: true},
 		{name: "no marker", files: map[string]string{"README.md": "x"}, ok: false},
 		{name: "empty dir", files: map[string]string{}, ok: false},
 	}
@@ -83,7 +89,7 @@ func TestDetect_does_not_treat_directory_marker_as_file(t *testing.T) {
 }
 
 func TestAllTemplates_are_embedded_and_multi_stage(t *testing.T) {
-	for _, name := range []Name{NameGo, NameNode, NameVue, NameJava, NameGradle} {
+	for _, name := range []Name{NameGo, NameNode, NameVue, NameJava, NameGradle, NamePython, NamePhp} {
 		content, err := files.ReadFile(string(name) + ".Dockerfile")
 		if err != nil {
 			t.Fatalf("template %s not embedded: %v", name, err)
@@ -108,6 +114,8 @@ func TestScript_mapping(t *testing.T) {
 		{name: NameNode, wantOK: true, wantIncl: "npm run build"},
 		{name: NameVue, wantOK: true, wantIncl: "npm run build"},
 		{name: NameGradle, wantOK: false},
+		{name: NamePython, wantOK: true, wantIncl: "pip install -r requirements.txt"},
+		{name: NamePhp, wantOK: true, wantIncl: "composer install --no-dev --optimize-autoloader"},
 	}
 	for _, tt := range tests {
 		t.Run(string(tt.name), func(t *testing.T) {
@@ -151,7 +159,7 @@ func TestScripts_regressions(t *testing.T) {
 }
 
 func TestTemplates_that_call_scripts_reference_scriptpath(t *testing.T) {
-	for _, name := range []Name{NameGo, NameNode, NameVue, NameJava} {
+	for _, name := range []Name{NameGo, NameNode, NameVue, NameJava, NamePython, NamePhp} {
 		content, err := files.ReadFile(string(name) + ".Dockerfile")
 		if err != nil {
 			t.Fatal(err)

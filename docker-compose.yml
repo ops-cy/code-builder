@@ -15,6 +15,9 @@ services:
       # 可选：全局 SSH Deploy Key 私钥路径（需与下方 secrets 挂载路径一致）
       # 例如 /run/secrets/gitlab_deploy_key；留空则使用容器默认 ssh 身份
       GITLAB_DEPLOY_KEY_PATH: ${GITLAB_DEPLOY_KEY_PATH:-}
+      # 可选：镜像仓库密码，供 config.yaml 的 registry.password 以 ${REGISTRY_PASSWORD} 引用
+      # 仅在配置了 registry.url（启用推送）时需要
+      REGISTRY_PASSWORD: ${REGISTRY_PASSWORD:-}
       # 可选：debug | info | warn | error
       LOG_LEVEL: ${LOG_LEVEL:-info}
     volumes:
@@ -25,5 +28,6 @@ services:
       # 构建工作区与构建日志（持久化）
       - ./data:/app/workspace
       - ./logs:/app/logs
-      # Docker Socket：服务通过宿主机 Docker 守护进程执行 docker build（仅本地构建，不推送）
+      # Docker Socket：服务通过宿主机 Docker 守护进程执行 docker build；
+      # 默认仅本地，配置 registry.url 后可 docker login + push
       - /var/run/docker.sock:/var/run/docker.sock

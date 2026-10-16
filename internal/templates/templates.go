@@ -14,7 +14,7 @@ import (
 	"strings"
 )
 
-//go:embed go.Dockerfile node.Dockerfile vue.Dockerfile java.Dockerfile gradle.Dockerfile scripts/*.sh
+//go:embed go.Dockerfile node.Dockerfile vue.Dockerfile java.Dockerfile gradle.Dockerfile python.Dockerfile php.Dockerfile scripts/*.sh
 var files embed.FS
 
 // Name identifies a built-in template.
@@ -26,6 +26,8 @@ const (
 	NameVue    Name = "vue"
 	NameJava   Name = "java"
 	NameGradle Name = "gradle"
+	NamePython Name = "python"
+	NamePhp    Name = "php"
 )
 
 // Template is a detected built-in build recipe.
@@ -42,10 +44,12 @@ const ScriptPath = ".gitlab-builder/build.sh"
 // scriptByTemplate maps a template to the embedded build script it runs. A
 // template absent from this map uses no script (e.g. Gradle).
 var scriptByTemplate = map[Name]string{
-	NameGo:   "scripts/build-go.sh",
-	NameJava: "scripts/build-maven.sh",
-	NameNode: "scripts/build-node.sh",
-	NameVue:  "scripts/build-node.sh",
+	NameGo:     "scripts/build-go.sh",
+	NameJava:   "scripts/build-maven.sh",
+	NameNode:   "scripts/build-node.sh",
+	NameVue:    "scripts/build-node.sh",
+	NamePython: "scripts/build-python.sh",
+	NamePhp:    "scripts/build-php.sh",
 }
 
 // Script returns the build script that the named template invokes (its content
@@ -65,7 +69,8 @@ func Script(name Name) (content []byte, ok bool) {
 
 // Detect inspects repoDir for language marker files and returns the matching
 // built-in template. It returns ok=false when no marker matches. Detection
-// order is Go, Maven, Gradle, then package.json (Vue before plain Node).
+// order is Go, Maven, Gradle, package.json (Vue before plain Node), then
+// Python, then PHP (composer.json).
 func Detect(repoDir string) (Template, bool) {
 	name, ok := detectName(repoDir)
 	if !ok {
@@ -91,8 +96,24 @@ func detectName(repoDir string) (Name, bool) {
 			return NameVue, true
 		}
 		return NameNode, true
+	case isPythonProject(repoDir):
+		return NamePython, true
+	case isFile(filepath.Join(repoDir, "composer.json")):
+		return NamePhp, true
 	}
 	return "", false
+}
+
+// isPythonProject reports whether the repo root carries any Python dependency
+// marker the build script understands: requirements.txt, Pipfile, or
+// pyproject.toml.
+func isPythonProject(repoDir string) bool {
+	for _, marker := range []string{"requirements.txt", "Pipfile", "pyproject.toml"} {
+		if isFile(filepath.Join(repoDir, marker)) {
+			return true
+		}
+	}
+	return false
 }
 
 func isFile(path string) bool {

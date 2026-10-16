@@ -15,8 +15,9 @@ import (
 // project on code.domain that sends a webhook triggers a build, with its URL,
 // branch and commit taken from the event payload.
 type Config struct {
-	Server ServerConfig `yaml:"server"`
-	Code   CodeConfig   `yaml:"code"`
+	Server   ServerConfig   `yaml:"server"`
+	Code     CodeConfig     `yaml:"code"`
+	Registry RegistryConfig `yaml:"registry"`
 }
 
 // ServerConfig holds HTTP listener and workspace settings.
@@ -43,6 +44,38 @@ type CodeConfig struct {
 	// Branches is the exact-match whitelist of push branches that trigger a
 	// build; defaults to [main, master] when omitted.
 	Branches []string `yaml:"branches"`
+}
+
+// RegistryConfig is the optional image-push target. It is disabled unless a
+// URL is configured, so an omitted section (or an empty url) keeps builds
+// local-only — the documented default.
+type RegistryConfig struct {
+	// URL is the registry host (e.g. "registry.example.com"); it doubles as
+	// the enable switch. A trailing slash is tolerated.
+	URL string `yaml:"url"`
+	// Project is an optional image-name prefix / namespace (e.g. "tenants").
+	Project string `yaml:"project"`
+	// Username and Password are optional credentials; when both are set a
+	// `docker login` runs before the push. When both are empty an already
+	// authenticated daemon (or an anonymous registry) is assumed.
+	Username string `yaml:"username"`
+	Password string `yaml:"password"`
+}
+
+// Enabled reports whether built images are pushed after build. The URL is the
+// switch: no URL, no push.
+func (r RegistryConfig) Enabled() bool {
+	return strings.TrimSpace(r.URL) != ""
+}
+
+// RemoteRef is the fully-qualified push reference for image:tag:
+// "<url>[/<project>]/<image>:<tag>", with redundant slashes normalised.
+func (r RegistryConfig) RemoteRef(image, tag string) string {
+	base := strings.TrimRight(strings.TrimSpace(r.URL), "/")
+	if p := strings.Trim(strings.TrimSpace(r.Project), "/"); p != "" {
+		base += "/" + p
+	}
+	return base + "/" + strings.TrimPrefix(image, "/") + ":" + tag
 }
 
 // Repository is the runtime view of one build job, derived from the webhook
@@ -157,6 +190,12 @@ func (c Config) validate() error {
 		if strings.TrimSpace(b) == "" {
 			return fmt.Errorf("config: code.branches must not contain empty entries")
 		}
+	}
+	if (c.Registry.Username == "") != (c.Registry.Password == "") {
+		return fmt.Errorf("config: registry.username and registry.password must be set together")
+	}
+	if !c.Registry.Enabled() && (c.Registry.Username != "" || c.Registry.Password != "") {
+		return fmt.Errorf("config: registry.username/password set but registry.url is empty (set registry.url to enable pushing)")
 	}
 	return nil
 }

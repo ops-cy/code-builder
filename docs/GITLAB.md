@@ -68,7 +68,9 @@ curl http://<构建机IP>:8080/api/builds/<build_id>/log
 ```
 
 构建成功后在构建机执行 `docker images` 可看到
-`<仓库名>:<commit SHA 前 8 位>` 镜像（仅本地，不推送）。
+`<仓库名>:<commit SHA 前 8 位>` 镜像。默认仅本地；若 `config.yaml` 配置了
+`registry.url`，同一镜像还会以 `<url>[/<project>]/<仓库名>:<sha8>` 推送到镜像仓库（日志中
+`==> registry push enabled remote=...` 一行可见）。
 
 ## 5. 准入与触发策略速查
 
@@ -84,12 +86,19 @@ code:
   branches:                       # 触发分支白名单（精确匹配）
     - "main"
     - "master"
+
+# 可选：配置 url 后构建成功自动推送，省略则仅本地构建
+# registry:
+#   url: "registry.example.com"
+#   project: "tenants"
+#   username: "ci"
+#   password: "${REGISTRY_PASSWORD}"
 ```
 
 - `feature/x` 的 Push → 不在白名单 → **不构建**（`branch_filtered`）
 - 事件仓库地址在其他域名 → **不构建**（`host_not_allowed`，即使 Secret 正确也拒绝）
 - 任意新项目无需改配置：在授权域名的项目上挂 Webhook 即可接入
-- 构建文件：仓库根目录有 `Dockerfile` 就用它；没有时按语言标记（Go / Node / Vue / Java / Gradle）自动套用内置模板与构建脚本，两者都缺才报错
+- 构建文件：仓库根目录有 `Dockerfile` 就用它；没有时按语言标记（Go / Node / Vue / Java / Gradle / Python / PHP）自动套用内置模板与构建脚本，两者都缺才报错
 
 ## 6. 常见问题
 

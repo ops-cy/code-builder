@@ -39,6 +39,7 @@ type Deps struct {
 	Queue         *queue.Queue
 	Logger        *slog.Logger
 	Workspace     string
+	Registry      config.RegistryConfig // optional image push target (URL-gated)
 }
 
 // Handler returns the gin handler for POST /webhook. The dedup table and
@@ -217,6 +218,7 @@ func pipeline(deps Deps, buildID string, repo config.Repository, branch, sha str
 			SHA:       sha,
 			Log:       logf,
 			Workspace: deps.Workspace,
+			Registry:  deps.Registry,
 		})
 		duration := time.Since(started).Round(time.Millisecond)
 		if err != nil {

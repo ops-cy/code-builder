@@ -30,3 +30,17 @@ code:
   branches:
     - "main"
     - "master"
+
+# 镜像推送（可选）。不写这一段 = 只构建本地镜像（默认，行为与以前完全一致）。
+# 填写 registry.url 即启用：构建成功后打远程 tag 并推送。
+# 判定规则：url 非空 → 推送；url 为空或缺省 → 仅本地。
+registry:
+  # 镜像仓库地址，例: registry.example.com（留空=仅本地构建）
+  url: ""
+  # 可选：镜像名前缀 / 命名空间，例: tenants
+  project: ""
+  # 可选：登录凭据。username 与 password 要么都填、要么都留空；
+  # 都填则在推送前执行 docker login，都空则假定守护进程已登录。
+  # 建议 password 用 ${REGISTRY_PASSWORD} 由环境变量注入（未设置将启动失败）。
+  username: ""
+  password: ""
