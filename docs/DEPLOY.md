@@ -5,7 +5,7 @@
 - 构建机已安装 Docker 20+ 与 Docker Compose v2
 - 构建机可访问 GitLab 实例（SSH 端口与 Web 端口）
 - GitLab 侧已为目标仓库添加 Deploy Key（见 [GITLAB.md](GITLAB.md)）
-- 每个被构建仓库的根目录有 `Dockerfile`（服务不生成模板）
+- 每个被构建仓库的根目录有 `Dockerfile`，或至少含可识别的语言标记（`go.mod` / `pom.xml` / `build.gradle(.kts)` / `package.json`）；两者都没有时服务会明确报错（不猜测）
 
 ## 目录结构
 
@@ -123,6 +123,8 @@ docker image prune
 | 返回 202 `duplicate` | 同仓库同 Commit 仍在排队/构建中，属预期行为 |
 | 返回 503 `queue_full` | 待处理任务超过 `queue_size`；等待积压消化或调大该值 |
 | 构建失败：git 相关 | 看 `/api/builds/:id/log`：`Permission denied (publickey)` 说明 Deploy Key 未配置或未添加到 GitLab；`HOST IDENTIFICATION HAS CHANGED` 说明 SSH 主机密钥被变更（TOFU 后拒绝），确认目标主机后删除 `{workspace}/.ssh/known_hosts` 对应行 |
-| 构建失败：`no Dockerfile at repository root` | 该仓库根目录没有 `Dockerfile`；服务不生成模板，请在仓库根目录提供 |
+| 构建失败：`no Dockerfile at repository root and no built-in template matched` | 该仓库根目录既没有 `Dockerfile` 也没有可识别的语言标记（Go/Node/Vue/Java/Gradle）；请在仓库根目录提供自己的 `Dockerfile`，或确保语言标记可被识别 |
+| 构建失败：套用了内置模板但入口/产物不符 | 模板约定：Go 构建**根包**产物 `app`、Node 入口 `dist/index.js`、Maven 产物 `app.jar`；不符时在仓库根目录提供自己的 `Dockerfile` 覆盖模板 |
+| 构建失败：找不到 `.gitlab-builder/build.sh` | 仓库的 `.dockerignore` 排除了该目录；请勿排除模板写入的构建脚本，或在仓库根目录提供自己的 `Dockerfile` |
 | 构建失败：`docker daemon not reachable` | 容器内未挂载 docker.sock 或宿主机无 Docker；检查 `docker-compose.yml` 卷挂载 |
 | 构建失败：超时 | clone 超过 15 分钟、docker build 超过 25 分钟或单任务超过 30 分钟会自动终止并标记失败，查看日志定位慢点 |

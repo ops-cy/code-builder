@@ -26,10 +26,11 @@ type Request struct {
 	Workspace string
 }
 
-// Build clones the repo at SHA, requires the repository's own root
-// Dockerfile, computes the sha8 tag, and runs docker build. Progress is
-// written to req.Log: clone timings, the docker command and its output, the
-// final image tags. Errors never contain credentials (URLs are masked).
+// Build clones the repo at SHA, selects the build recipe (the repository's own
+// root Dockerfile, else a built-in language template), computes the sha8 tag,
+// and runs docker build. Progress is written to req.Log: clone timings, the
+// chosen dockerfile source, the docker command and its output, the final image
+// tags. Errors never contain credentials (URLs are masked).
 func Build(ctx context.Context, req Request) ([]string, error) {
 	fmt.Fprintf(req.Log, "==> clone start repo=%s url=%s branch=%s sha=%s\n",
 		req.Repo.Name, gitx.MaskURL(req.Repo.URL), req.Branch, req.SHA)
@@ -56,10 +57,11 @@ func Build(ctx context.Context, req Request) ([]string, error) {
 	}
 	fmt.Fprintf(req.Log, "==> clone done duration=%s\n", time.Since(cloneStart).Round(time.Millisecond))
 
-	dockerfileAbs, err := resolveDockerfile(dest)
+	dockerfileAbs, dockerfileSource, err := resolveDockerfile(dest)
 	if err != nil {
 		return nil, fmt.Errorf("builder: %w", err)
 	}
+	fmt.Fprintf(req.Log, "==> dockerfile source=%s path=%s\n", dockerfileSource, dockerfileAbs)
 
 	tags, err := TagsFor(req.Repo.Build.Image, req.SHA)
 	if err != nil {

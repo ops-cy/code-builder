@@ -89,7 +89,7 @@ code:
 - `feature/x` 的 Push → 不在白名单 → **不构建**（`branch_filtered`）
 - 事件仓库地址在其他域名 → **不构建**（`host_not_allowed`，即使 Secret 正确也拒绝）
 - 任意新项目无需改配置：在授权域名的项目上挂 Webhook 即可接入
-- 仓库根目录**必须**有 `Dockerfile`，服务不生成模板
+- 构建文件：仓库根目录有 `Dockerfile` 就用它；没有时按语言标记（Go / Node / Vue / Java / Gradle）自动套用内置模板与构建脚本，两者都缺才报错
 
 ## 6. 常见问题
 

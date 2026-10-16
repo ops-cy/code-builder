@@ -13,7 +13,7 @@ GitLab Webhook 触发的**通用 Docker 镜像自动构建服务**。任何挂�
 - **任务队列**：全局并发可配；**同一仓库（按归一化 URL）串行、不同仓库并行**
 - **重复投递去重**：同一仓库的同一 Commit 在排队/构建期间不会重复入队，重发返回 `duplicate`
 - **Webhook Secret 校验**：`X-Gitlab-Token` 恒定时比较，常数时间防时序攻击
-- **仓库自带 Dockerfile**：只使用仓库根目录的 `Dockerfile`，不生成、不切换模板；缺失即明确报错
+- **仓库自带 Dockerfile 优先，内置模板兜底**：有 `Dockerfile` 就用；没有时按语言标记（Go / Node / Vue / Java / Gradle）套用内置模板并调用内置构建脚本（`build-go` / `build-maven` / `build-node`），两类都没有才明确报错
 - **构建日志**：每次构建的完整 git + docker 输出落盘，可经 API 查询；URL 凭据全程脱敏
 - **防泄漏与超时**：SSH 主机密钥 `accept-new`（首次 TOFU、之后拒绝变更）；clone 15 分钟 / docker build 25 分钟 / 单任务 30 分钟超时兜底
 
@@ -117,9 +117,38 @@ code:
   branches: ["main", "master"]
 ```
 
-## Dockerfile 要求
+## 构建文件选择
 
-每个被构建的仓库**必须**在仓库根目录提供自己的 `Dockerfile`（构建上下文即仓库根）。服务不生成 Dockerfile、不按语言切换模板；缺失时构建以 `no Dockerfile at repository root` 明确失败。
+构建上下文始终是仓库根目录。构建方式按以下顺序确定：
+
+1. **仓库自带 Dockerfile**：仓库根目录存在 `Dockerfile` 时直接使用，绝不覆盖、绝不替换（也不会写入任何脚本）；
+2. **内置模板 + 构建脚本兜底**：没有 `Dockerfile` 时，按仓库根目录的语言标记自动选择内置多阶段模板，并把模板要用的构建脚本写入仓库根的 `.gitlab-builder/build.sh`，随后 `docker build`：
+
+| 模板 | 触发标记 | 调用的脚本 | 产物 → 运行方式 |
+|---|---|---|---|
+| `go` | `go.mod` | `build-go.sh 0` | `go mod tidy` + `go build -o app .`（**根包**）→ 静态产物进 `scratch` |
+| `java` | `pom.xml` | `build-maven.sh 21` | `mvn clean package -DskipTests` → `app.jar` → JRE 21 |
+| `gradle` | `build.gradle` / `build.gradle.kts` | 无脚本 | `gradle bootJar`（否则 `build`）→ JRE 21 |
+| `vue` | `package.json`（含 `vue` / `nuxt` / `@vue/*` 依赖） | `build-node.sh lts npm` | Node 构建产物 → nginx 托管 |
+| `node` | `package.json`（无 Vue 依赖） | `build-node.sh lts npm` | Node 构建 → 非 root 运行，入口 `dist/index.js` |
+
+3. **两者都没有**：既无 `Dockerfile` 也无识别到的语言标记时，构建以 `no Dockerfile at repository root and no built-in template matched` 明确失败（不猜测、不生成空模板）。
+
+### 内置构建脚本
+
+三个脚本内嵌在服务二进制中（源码 `internal/templates/scripts/`），按所选模板写入 `.gitlab-builder/build.sh` 供构建阶段调用：
+
+- **`build-go.sh <cgo-enabled>`**：`go mod tidy` 后 `GOOS=linux GOARCH=amd64 CGO_ENABLED=$1 go build -buildvcs=false -o app -trimpath .`（构建**根包**，产物 `app`）。
+- **`build-maven.sh <java-version>`**：有 SDKMAN 则用其切换 Java/Maven（否则 WARN 降级用系统工具）；`mvn clean package -DskipTests` 后取**主 jar**（跳过 `-sources` / `-javadoc` / `-plain`）复制为 `app.jar`。
+- **`build-node.sh <node-version> <package-manager>`**：有 Volta 则用其切换 Node（否则 WARN 降级用系统 Node）；按 `npm` / `pnpm` / `yarn` 安装依赖并执行项目 `build`。
+
+参数由模板写死为约定默认值（`cgo=0`、`java=21`、`node=lts`、`pm=npm`）。脚本对 SDKMAN / Volta **优雅降级**：官方镜像里没有版本管理器时自动改用镜像自带工具链。
+
+注意：
+
+- 约定入口/产物（Go 根包 `app`、Node 入口 `dist/index.js`）不符时，请在仓库根目录提供自己的 `Dockerfile` 覆盖模板；
+- `.gitlab-builder/` 属构建上下文，**请勿**在仓库 `.dockerignore` 中排除；
+- 每次构建日志会写明来源与路径：`==> dockerfile source=repository|template:<name> path=...`。
 
 ## 文档
 
