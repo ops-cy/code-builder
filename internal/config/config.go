@@ -10,13 +10,13 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Config is the root configuration document. Repositories are not listed
-// here: every project on the GitLab host that sends a webhook to this service
-// triggers a build, with its URL and branch taken from the event payload.
+// Config is the root configuration document: HTTP runtime settings plus the
+// authorised code-hosting instance. Repositories are never listed — any
+// project on code.domain that sends a webhook triggers a build, with its URL,
+// branch and commit taken from the event payload.
 type Config struct {
 	Server ServerConfig `yaml:"server"`
-	GitLab GitLabConfig `yaml:"gitlab"`
-	Build  BuildConfig  `yaml:"build"`
+	Code   CodeConfig   `yaml:"code"`
 }
 
 // ServerConfig holds HTTP listener and workspace settings.
@@ -28,66 +28,41 @@ type ServerConfig struct {
 	Concurrency int    `yaml:"concurrency"`
 }
 
-// GitLabConfig identifies the GitLab instance and authenticates webhooks.
-type GitLabConfig struct {
-	// Host is the GitLab domain repositories live on (e.g.
-	// "code.zmatrix.cn"). Plain domain or full URL both work; only events
-	// whose clone URL belongs to this host are accepted — everything else
-	// from a valid secret is rejected as host_not_allowed.
-	Host          string `yaml:"host"`
+// CodeConfig identifies the authorised GitLab instance and the trigger
+// branch whitelist. It is the entire repository-access policy: no per-repo
+// fields exist.
+type CodeConfig struct {
+	// WebhookSecret must equal the GitLab webhook Secret token; supplied via
+	// ${GITLAB_WEBHOOK_SECRET} environment expansion (unset vars fail boot).
 	WebhookSecret string `yaml:"webhook_secret"`
+	// Domain is the GitLab instance repositories live on (e.g.
+	// "code.gitlab.com"). Events whose clone URL belongs to any other host
+	// are rejected as host_not_allowed. Plain domain or full URL both work;
+	// ports are ignored when comparing.
+	Domain string `yaml:"domain"`
+	// Branches is the exact-match whitelist of push branches that trigger a
+	// build; defaults to [main, master] when omitted.
+	Branches []string `yaml:"branches"`
 }
-
-// BuildConfig holds the global build defaults applied to every triggered
-// repository; per-repo overrides do not exist.
-type BuildConfig struct {
-	Branches      []string          `yaml:"branches"`
-	BranchRegex   string            `yaml:"branch_regex"`
-	ImagePrefix   string            `yaml:"image_prefix"`
-	Dockerfile    string            `yaml:"dockerfile"` // "auto" (default) | template name | repo path
-	Context       string            `yaml:"context"`
-	DeployKeyPath string            `yaml:"deploy_key_path"`
-	Args          map[string]string `yaml:"args"`
-	TagLatest     bool              `yaml:"tag_latest"`
-	NoCache       bool              `yaml:"no_cache"`
-}
-
-// ImageFor derives the local image name from a project's path_with_namespace,
-// sanitised to characters Docker accepts as a repository name.
-func (b BuildConfig) ImageFor(pathWithNamespace string) string {
-	sanitised := invalidImageChars.ReplaceAllString(strings.ToLower(pathWithNamespace), "-")
-	sanitised = strings.Trim(sanitised, "/")
-	if sanitised == "" {
-		sanitised = "unnamed-repo"
-	}
-	prefix := strings.TrimSuffix(b.ImagePrefix, "/")
-	if prefix == "" {
-		return sanitised
-	}
-	return strings.ToLower(prefix) + "/" + sanitised
-}
-
-var invalidImageChars = regexp.MustCompile(`[^a-z0-9._/-]+`)
 
 // Repository is the runtime view of one build job, derived from the webhook
-// event plus the global build config. It is never parsed from YAML.
+// event. It is never parsed from YAML.
 type Repository struct {
+	// Key is the normalised clone URL — the identity for queue
+	// serialisation and duplicate-delivery detection.
+	Key string
+	// Name is the sanitised repository name used for display and as the
+	// workspace directory prefix.
 	Name          string
 	URL           string
-	Branches      []string
-	BranchRegex   string
 	DeployKeyPath string
 	Build         BuildSpec
 }
 
 // BuildSpec is the runtime build description handed to the builder.
+// Uniform for every repository by design.
 type BuildSpec struct {
-	Context    string
-	Dockerfile string
-	Image      string
-	Args       map[string]string
-	TagLatest  bool
-	NoCache    bool
+	Image string
 }
 
 var envPattern = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
@@ -155,28 +130,22 @@ func (c *Config) applyDefaults() {
 		c.Server.LogsDir = "/app/logs"
 	}
 	if c.Server.QueueSize <= 0 {
-		c.Server.QueueSize = 100
+		c.Server.QueueSize = 10
 	}
 	if c.Server.Concurrency <= 0 {
 		c.Server.Concurrency = 2
 	}
-	if len(c.Build.Branches) == 0 {
-		c.Build.Branches = []string{"main", "master"}
-	}
-	if c.Build.BranchRegex == "" {
-		c.Build.BranchRegex = ".*"
-	}
-	if c.Build.Dockerfile == "" {
-		c.Build.Dockerfile = "auto"
-	}
-	if c.Build.Context == "" {
-		c.Build.Context = "."
+	if len(c.Code.Branches) == 0 {
+		c.Code.Branches = []string{"main", "master"}
 	}
 }
 
 func (c Config) validate() error {
-	if c.GitLab.WebhookSecret == "" {
-		return fmt.Errorf("config: gitlab.webhook_secret is required")
+	if c.Code.WebhookSecret == "" {
+		return fmt.Errorf("config: code.webhook_secret is required (use ${GITLAB_WEBHOOK_SECRET})")
+	}
+	if strings.TrimSpace(c.Code.Domain) == "" {
+		return fmt.Errorf("config: code.domain is required (the GitLab instance domain, e.g. code.gitlab.com)")
 	}
 	if c.Server.Concurrency < 1 {
 		return fmt.Errorf("config: server.concurrency must be >= 1")
@@ -184,11 +153,10 @@ func (c Config) validate() error {
 	if c.Server.QueueSize < 1 {
 		return fmt.Errorf("config: server.queue_size must be >= 1")
 	}
-	if strings.TrimSpace(c.GitLab.Host) == "" {
-		return fmt.Errorf("config: gitlab.host is required (the GitLab domain, e.g. code.zmatrix.cn)")
-	}
-	if _, err := regexp.Compile(c.Build.BranchRegex); err != nil {
-		return fmt.Errorf("config: build.branch_regex %q: %w", c.Build.BranchRegex, err)
+	for _, b := range c.Code.Branches {
+		if strings.TrimSpace(b) == "" {
+			return fmt.Errorf("config: code.branches must not contain empty entries")
+		}
 	}
 	return nil
 }

@@ -41,14 +41,26 @@ func main() {
 	q := queue.New(cfg.Server.Concurrency, cfg.Server.QueueSize)
 	go q.Start(ctx)
 
+	// Optional SSH deploy key for every clone (not part of the YAML file):
+	// fail fast at boot if configured but inaccessible.
+	deployKey := os.Getenv("GITLAB_DEPLOY_KEY_PATH")
+	if deployKey != "" {
+		if _, err := os.Stat(deployKey); err != nil {
+			logger.Error("GITLAB_DEPLOY_KEY_PATH is set but not accessible",
+				slog.String("path", deployKey), slog.Any("err", err))
+			os.Exit(1)
+		}
+	}
+
 	deps := webhook.Deps{
-		Host:      cfg.GitLab.Host,
-		Build:     cfg.Build,
-		Secret:    cfg.GitLab.WebhookSecret,
-		Store:     st,
-		Queue:     q,
-		Logger:    logger,
-		Workspace: cfg.Server.Workspace,
+		Domain:        cfg.Code.Domain,
+		Branches:      cfg.Code.Branches,
+		DeployKeyPath: deployKey,
+		Secret:        cfg.Code.WebhookSecret,
+		Store:         st,
+		Queue:         q,
+		Logger:        logger,
+		Workspace:     cfg.Server.Workspace,
 	}
 	if err := server.New(cfg, logger, deps).Run(ctx); err != nil {
 		logger.Error("server exited", slog.Any("err", err))

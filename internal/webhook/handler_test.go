@@ -22,23 +22,18 @@ const testSecret = "test-secret"
 
 func testRepo() config.Repository {
 	return config.Repository{
-		Name:     "app",
-		URL:      "ssh://git@example.com:20022/group/app.git",
-		Branches: []string{"main"},
-		Build:    config.BuildSpec{Image: "local/app"},
+		Key:   "example.com/group/app",
+		Name:  "app",
+		URL:   "ssh://git@example.com:20022/group/app.git",
+		Build: config.BuildSpec{Image: "app"},
 	}
 }
 
 func newTestDeps(t *testing.T, q *queue.Queue) Deps {
 	t.Helper()
 	return Deps{
-		Host: "example.com",
-		Build: config.BuildConfig{
-			Branches:    []string{"main"},
-			BranchRegex: ".*",
-			Dockerfile:  "auto",
-			Context:     ".",
-		},
+		Domain:    "example.com",
+		Branches:  []string{"main"},
 		Secret:    testSecret,
 		Store:     store.New(t.TempDir()),
 		Queue:     q,
@@ -188,7 +183,27 @@ func Test_Webhook_when_WrongHost_thenReturn202HostNotAllowed(t *testing.T) {
 	}
 }
 
-func Test_Webhook_when_BranchFiltered_thenReturn202BranchFiltered(t *testing.T) {
+func Test_Webhook_when_MissingCloneURL_thenReturn202MissingRepoURL(t *testing.T) {
+	// Given
+	r := newRouter(newTestDeps(t, queue.New(1, 10)))
+	ev := basePushEvent()
+	proj := ev["project"].(map[string]any)
+	proj["git_ssh_url"] = ""
+	proj["git_http_url"] = ""
+
+	// When
+	w := doWebhook(r, testSecret, pushBody(t, ev))
+
+	// Then
+	if w.Code != http.StatusAccepted {
+		t.Errorf("status = %d, want 202", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "missing_repo_url") {
+		t.Errorf("body = %s, want missing_repo_url", w.Body.String())
+	}
+}
+
+func Test_Webhook_when_BranchNotWhitelisted_thenReturn202BranchFiltered(t *testing.T) {
 	// Given
 	r := newRouter(newTestDeps(t, queue.New(1, 10)))
 	ev := basePushEvent()
@@ -206,7 +221,25 @@ func Test_Webhook_when_BranchFiltered_thenReturn202BranchFiltered(t *testing.T) 
 	}
 }
 
-func Test_Webhook_when_ValidPush_thenReturn202QueuedWithBuild(t *testing.T) {
+func Test_Webhook_when_InvalidCommitSHA_thenReturn202Ignored(t *testing.T) {
+	// Given
+	r := newRouter(newTestDeps(t, queue.New(1, 10)))
+	ev := basePushEvent()
+	ev["checkout_sha"] = "xyz123" // not a full hex object id
+
+	// When
+	w := doWebhook(r, testSecret, pushBody(t, ev))
+
+	// Then
+	if w.Code != http.StatusAccepted {
+		t.Errorf("status = %d, want 202", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "invalid commit sha") {
+		t.Errorf("body = %s, want invalid commit sha", w.Body.String())
+	}
+}
+
+func Test_Webhook_when_ValidPush_thenReturn202QueuedWithDerivedBuild(t *testing.T) {
 	// Given
 	deps := newTestDeps(t, queue.New(1, 10))
 	r := newRouter(deps)
@@ -222,6 +255,8 @@ func Test_Webhook_when_ValidPush_thenReturn202QueuedWithBuild(t *testing.T) {
 		Status  string `json:"status"`
 		BuildID string `json:"build_id"`
 		SHA     string `json:"sha"`
+		Image   string `json:"image"`
+		Tag     string `json:"tag"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("unmarshal: %v", err)
@@ -232,6 +267,12 @@ func Test_Webhook_when_ValidPush_thenReturn202QueuedWithBuild(t *testing.T) {
 	if resp.SHA != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
 		t.Errorf("sha = %q, want checkout_sha", resp.SHA)
 	}
+	if resp.Image != "app" {
+		t.Errorf("image = %q, want app (derived from repository name)", resp.Image)
+	}
+	if resp.Tag != "aaaaaaaa" {
+		t.Errorf("tag = %q, want first 8 chars of commit sha", resp.Tag)
+	}
 	b, ok := deps.Store.Get(resp.BuildID)
 	if !ok {
 		t.Fatal("build not in store")
@@ -239,11 +280,45 @@ func Test_Webhook_when_ValidPush_thenReturn202QueuedWithBuild(t *testing.T) {
 	if b.Status != store.StatusQueued {
 		t.Errorf("status = %q, want queued", b.Status)
 	}
-	if b.ShortSHA != "aaaaaaaaaaaa" {
-		t.Errorf("ShortSHA = %q, want 12 chars", b.ShortSHA)
+	if b.ShortSHA != "aaaaaaaa" {
+		t.Errorf("ShortSHA = %q, want 8 chars", b.ShortSHA)
 	}
 	if deps.Queue.Len() != 1 {
 		t.Errorf("queue len = %d, want 1", deps.Queue.Len())
+	}
+}
+
+func Test_Webhook_when_RedeliveredSameCommit_thenReturn202DuplicateWithoutRebuild(t *testing.T) {
+	// Given: the same event delivered twice while the first build is queued.
+	deps := newTestDeps(t, queue.New(1, 10))
+	r := newRouter(deps)
+
+	// When
+	first := doWebhook(r, testSecret, pushBody(t, basePushEvent()))
+	second := doWebhook(r, testSecret, pushBody(t, basePushEvent()))
+
+	// Then
+	if first.Code != http.StatusAccepted {
+		t.Fatalf("first status = %d body = %s, want 202", first.Code, first.Body.String())
+	}
+	var a, b struct {
+		Status  string `json:"status"`
+		BuildID string `json:"build_id"`
+	}
+	if err := json.Unmarshal(first.Body.Bytes(), &a); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(second.Body.Bytes(), &b); err != nil {
+		t.Fatal(err)
+	}
+	if b.Status != "duplicate" {
+		t.Errorf("second status = %q body = %s, want duplicate", b.Status, second.Body.String())
+	}
+	if b.BuildID != a.BuildID {
+		t.Errorf("second build_id = %q, want %q", b.BuildID, a.BuildID)
+	}
+	if deps.Queue.Len() != 1 {
+		t.Errorf("queue len = %d, want 1 (duplicate must not enqueue)", deps.Queue.Len())
 	}
 }
 

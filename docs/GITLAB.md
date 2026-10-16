@@ -12,11 +12,11 @@
 3. 打开**每个需要构建的项目** → **Settings → Repository** → 展开 **Deploy Keys**
 4. **Title** 填标识（如 `gitlab-builder`），**Key** 粘贴同一把公钥
 5. 勾选 **Read-only** → **Add key**
-6. 在 `config/config.yaml` 的全局构建段填写一次：
-   ```yaml
-   build:
-     deploy_key_path: "/run/secrets/gitlab_deploy_key"
+6. 通过环境变量告知服务（不写进 config.yaml）：
+   ```bash
+   export GITLAB_DEPLOY_KEY_PATH="/run/secrets/gitlab_deploy_key"
    ```
+   compose 部署时该值已在 `docker-compose.yml` 中透传（见 DEPLOY.md）。
 
 ## 2. 创建 Webhook
 
@@ -25,8 +25,8 @@
    - **URL**：`http://<构建机IP或域名>:8080/webhook`
    - **Secret token**：填写与构建机 `GITLAB_WEBHOOK_SECRET` **完全相同**的值
 3. **Trigger** 勾选 **Push events**
-   - 分支过滤**不要**在 GitLab 侧配置（留空即可）：是否构建由服务端
-     `branches` 白名单与 `branch_regex` 决定，两端重复配置容易产生歧义
+   - 分支过滤**不要**在 GitLab 侧配置（留空即可）：是否构建只由服务端
+     `code.branches` 白名单决定，两端重复配置容易产生歧义
 4. 点击 **Add webhook**
 
 ## 3. 验证连通性
@@ -36,10 +36,11 @@
 
    | 返回 | 含义 |
    |---|---|
-   | 202 `queued` | 成功入队，记下响应中的 `build_id` |
+   | 202 `queued` | 成功入队，记下响应中的 `build_id`（含 `image` 与 `tag`） |
    | 202 `ignored` | 测试事件不是真实分支 Push（正常，说明链路已通） |
-   | 202 `host_not_allowed` | 事件仓库地址不在 `gitlab.host` 域名下，检查 `config.yaml` 的 `gitlab.host` |
-   | 202 `branch_filtered` | 当前分支不在触发白名单 |
+   | 202 `host_not_allowed` | 事件仓库地址域名不等于 `code.domain`，检查 `config.yaml` 的 `code.domain` |
+   | 202 `branch_filtered` | 当前分支不在 `code.branches` 白名单 |
+   | 202 `duplicate` | 同仓库同 Commit 已在排队/构建中（正常，未重复入队） |
    | 401 | Secret token 不一致 |
 
 3. 查询构建状态：
@@ -49,7 +50,7 @@
 
 ## 4. 正式触发
 
-向配置的触发分支 Push 一次提交：
+向白名单分支 Push 一次提交：
 
 ```bash
 git commit -m "trigger build" --allow-empty
@@ -67,31 +68,31 @@ curl http://<构建机IP>:8080/api/builds/<build_id>/log
 ```
 
 构建成功后在构建机执行 `docker images` 可看到
-`<image>:<分支>-<短SHA>` 镜像（仅本地，不推送）。
+`<仓库名>:<commit SHA 前 8 位>` 镜像（仅本地，不推送）。
 
-## 5. 分支触发策略速查
+## 5. 准入与触发策略速查
 
 服务端 `config.yaml`（全局生效，对所有被触发仓库一致）：
 
 ```yaml
-gitlab:
-  host: "gitlab.example.com"   # 只接受该域名下的项目事件
+server:
+  queue_size: 10                  # 待处理任务上限，超过返回 503
+  concurrency: 2                  # 全局并行数；同一仓库始终串行
 
-build:
-  branch_regex: ".*"           # 门槛：先过正则（默认匹配所有分支）
-  branches:                    # 白名单：再精确命中
+code:
+  domain: "gitlab.example.com"    # 只接受该域名下的仓库事件（域名精确相等，端口不影响）
+  branches:                       # 触发分支白名单（精确匹配）
     - "main"
-    - "release/*"              # 支持通配
-  dockerfile: "auto"           # 默认：仓库自带 Dockerfile 优先，否则自动选模板
+    - "master"
 ```
 
-- `feature/*` 的 Push：正则通过，但不在白名单 → **不构建**
-- `release/1.2` 的 Push：正则通过 + 通配命中 → **构建**
-- 想用正则完全接管匹配：白名单写全需要的分支名；两道过滤是 **AND** 关系
-- 任意新项目无需改配置：挂上 Webhook 即按上述规则构建
+- `feature/x` 的 Push → 不在白名单 → **不构建**（`branch_filtered`）
+- 事件仓库地址在其他域名 → **不构建**（`host_not_allowed`，即使 Secret 正确也拒绝）
+- 任意新项目无需改配置：在授权域名的项目上挂 Webhook 即可接入
+- 仓库根目录**必须**有 `Dockerfile`，服务不生成模板
 
 ## 6. 常见问题
 
 - **Push 了但没有任何记录**：先确认 Webhook 最近交付记录（Webhooks 页面底部 **Recent Deliveries**）是否有 202；若无交付，检查 URL 可达性与网络策略
-- **同一仓库连推多次**：任务按仓库串行排队，属预期行为，逐个按序构建
-- **修改了 config.yaml**：需 `docker compose restart gitlab-builder` 生效
+- **同一仓库连推多次**：任务按仓库（归一化 URL）串行排队；同 Commit 去重返回 `duplicate`，不同 Commit 逐个按序构建
+- **修改了 config.yaml 或环境变量**：需 `docker compose up -d`（重建容器）生效

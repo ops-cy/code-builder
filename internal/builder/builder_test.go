@@ -16,48 +16,53 @@ func TestMain(m *testing.M) {
 	goleak.VerifyTestMain(m)
 }
 
+const sha40 = "a1b2c3d4e5f67890a1b2c3d4e5f67890a1b2c3d4"
+
 func Test_TagsFor(t *testing.T) {
 	tests := []struct {
-		name      string
-		image     string
-		branch    string
-		sha       string
-		tagLatest bool
-		want      []string
+		name    string
+		image   string
+		sha     string
+		want    []string
+		wantErr bool
 	}{
 		{
-			name:   "simple branch short sha padded to 12",
-			image:  "local/app",
-			branch: "main",
-			sha:    "abcdef1234567890",
-			want:   []string{"local/app:main-abcdef123456"},
+			name:  "tag is first 8 chars of the full commit sha",
+			image: "backend-api",
+			sha:   sha40,
+			want:  []string{"backend-api:a1b2c3d4"},
 		},
 		{
-			name:   "slash in branch becomes dash",
-			image:  "local/app",
-			branch: "release/1.2",
-			sha:    "0123456789ab",
-			want:   []string{"local/app:release-1.2-0123456789ab"},
+			name:  "image with path separator keeps its prefix",
+			image: "local/app",
+			sha:   "0123456789abcdef0123456789abcdef01234567",
+			want:  []string{"local/app:01234567"},
 		},
 		{
-			name:   "short sha used whole",
-			image:  "app",
-			branch: "main",
-			sha:    "abc",
-			want:   []string{"app:main-abc"},
+			name:    "sha shorter than tag length rejected",
+			image:   "app",
+			sha:     "abc",
+			wantErr: true,
 		},
 		{
-			name:      "tag latest appended",
-			image:     "app",
-			branch:    "main",
-			sha:       "abcdef123456",
-			tagLatest: true,
-			want:      []string{"app:main-abcdef123456", "app:latest"},
+			name:    "non-hex sha rejected",
+			image:   "app",
+			sha:     "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+			wantErr: true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := TagsFor(tt.image, tt.branch, tt.sha, tt.tagLatest)
+			got, err := TagsFor(tt.image, tt.sha)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("TagsFor() = %v, want error", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("TagsFor() error = %v", err)
+			}
 			if len(got) != len(tt.want) {
 				t.Fatalf("TagsFor() = %v, want %v", got, tt.want)
 			}
@@ -70,32 +75,6 @@ func Test_TagsFor(t *testing.T) {
 	}
 }
 
-func Test_ResolveDockerfile_when_TemplateName_ThenMaterialiseIntoContext(t *testing.T) {
-	// Given
-	repoDir := t.TempDir()
-
-	// When
-	dockerfile, ctxDir, err := ResolveDockerfile(context.Background(), repoDir, config.BuildSpec{Dockerfile: "go.Dockerfile"})
-
-	// Then
-	if err != nil {
-		t.Fatalf("ResolveDockerfile() error = %v", err)
-	}
-	if ctxDir != repoDir {
-		t.Errorf("context = %q, want %q", ctxDir, repoDir)
-	}
-	content, err := os.ReadFile(dockerfile)
-	if err != nil {
-		t.Fatalf("read generated: %v", err)
-	}
-	if !strings.Contains(string(content), "FROM") {
-		t.Error("generated dockerfile missing FROM")
-	}
-	if filepath.Base(dockerfile) != generatedDockerfileName {
-		t.Errorf("generated name = %q, want %q", filepath.Base(dockerfile), generatedDockerfileName)
-	}
-}
-
 func Test_ResolveDockerfile_when_RepoOwnDockerfile_thenReturnRepoPath(t *testing.T) {
 	// Given
 	repoDir := t.TempDir()
@@ -104,30 +83,30 @@ func Test_ResolveDockerfile_when_RepoOwnDockerfile_thenReturnRepoPath(t *testing
 	}
 
 	// When
-	dockerfile, _, err := ResolveDockerfile(context.Background(), repoDir, config.BuildSpec{Dockerfile: "Dockerfile"})
+	dockerfile, err := resolveDockerfile(repoDir)
 
 	// Then
 	if err != nil {
-		t.Fatalf("ResolveDockerfile() error = %v", err)
+		t.Fatalf("resolveDockerfile() error = %v", err)
 	}
 	if dockerfile != filepath.Join(repoDir, "Dockerfile") {
 		t.Errorf("dockerfile = %q, want repo Dockerfile", dockerfile)
 	}
 }
 
-func Test_ResolveDockerfile_when_MissingEverywhere_thenReturnErrorListingTemplates(t *testing.T) {
-	// Given
+func Test_ResolveDockerfile_when_Missing_thenReturnClearError(t *testing.T) {
+	// Given: no template fallback — a repo without Dockerfile must fail loudly.
 	repoDir := t.TempDir()
 
 	// When
-	_, _, err := ResolveDockerfile(context.Background(), repoDir, config.BuildSpec{Dockerfile: "missing.Dockerfile"})
+	_, err := resolveDockerfile(repoDir)
 
 	// Then
 	if err == nil {
-		t.Fatal("ResolveDockerfile() error = nil, want error")
+		t.Fatal("resolveDockerfile() error = nil, want error")
 	}
-	if !strings.Contains(err.Error(), "go.Dockerfile") {
-		t.Errorf("error = %v, want it to list available templates", err)
+	if !strings.Contains(err.Error(), "no Dockerfile at repository root") {
+		t.Errorf("error = %v, want explicit missing-Dockerfile message", err)
 	}
 }
 
@@ -145,7 +124,7 @@ func stubExec(t *testing.T, handler func(ctx context.Context, name string, args 
 	return &calls
 }
 
-func Test_dockerBuild_when_Success_ThenPassesExpectedArgsAndStreamsLog(t *testing.T) {
+func Test_dockerBuild_when_Success_ThenPassesExpectedArgsAndStreamsCommand(t *testing.T) {
 	// Given
 	logFile := filepath.Join(t.TempDir(), "build.log")
 	logw, err := os.Create(logFile)
@@ -165,9 +144,7 @@ func Test_dockerBuild_when_Success_ThenPassesExpectedArgsAndStreamsLog(t *testin
 	err = dockerBuild(context.Background(), dockerBuildRequest{
 		ContextDir: "/src",
 		Dockerfile: "/src/Dockerfile",
-		Tags:       []string{"app:main-abc", "app:latest"},
-		BuildArgs:  map[string]string{"B": "2", "A": "1"},
-		NoCache:    true,
+		Tags:       []string{"app:a1b2c3d4"},
 		Log:        logw,
 	})
 
@@ -179,10 +156,17 @@ func Test_dockerBuild_when_Success_ThenPassesExpectedArgsAndStreamsLog(t *testin
 		t.Fatalf("calls = %v, want version probe + build", *calls)
 	}
 	build := strings.Join((*calls)[1], " ")
-	for _, want := range []string{"build", "-f /src/Dockerfile", "--no-cache", "--build-arg A=1", "--build-arg B=2", "-t app:main-abc", "-t app:latest", "/src"} {
+	for _, want := range []string{"build", "-f /src/Dockerfile", "-t app:a1b2c3d4", "/src"} {
 		if !strings.Contains(build, want) {
 			t.Errorf("build args %q missing %q", build, want)
 		}
+	}
+	content, readErr := os.ReadFile(logFile)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !strings.Contains(string(content), "docker command: docker build") {
+		t.Errorf("log = %s, want the exact docker command line", content)
 	}
 }
 
@@ -206,5 +190,32 @@ func Test_dockerBuild_when_DaemonUnreachable_thenReturnClearError(t *testing.T) 
 	}
 	if !strings.Contains(err.Error(), "docker daemon not reachable") {
 		t.Errorf("error = %v, want docker daemon not reachable", err)
+	}
+}
+
+func Test_WorkspaceDir_when_DifferentReposSameName_ThenIsolated(t *testing.T) {
+	// Given
+	ws := t.TempDir()
+	a := config.Repository{Key: "example.com/g1/app", Name: "app"}
+	b := config.Repository{Key: "example.com/g2/app", Name: "app"}
+
+	// When
+	da, err := workspaceDir(ws, a, sha40)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := workspaceDir(ws, b, sha40)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Then
+	if da == db {
+		t.Fatalf("dirs = %q for both repos, want per-repository isolation", da)
+	}
+	for _, d := range []string{da, db} {
+		if !strings.HasPrefix(d, ws) {
+			t.Errorf("dir %q not inside workspace %q", d, ws)
+		}
 	}
 }

@@ -26,7 +26,8 @@ type Job struct {
 }
 
 // Queue runs jobs with a global concurrency limit; jobs of the same
-// Repository.Name never overlap and run FIFO per repository.
+// repository (Repo.Key, the normalised clone URL) never overlap and run FIFO
+// per repository.
 type Queue struct {
 	mu      sync.Mutex
 	cond    *sync.Cond
@@ -104,7 +105,7 @@ func (q *Queue) worker(ctx context.Context) {
 			if idx := pickLocked(q.pending, q.running); idx >= 0 {
 				job = q.pending[idx]
 				q.pending = append(q.pending[:idx], q.pending[idx+1:]...)
-				q.running[job.Repo.Name] = true
+				q.running[repoKey(job)] = true
 				found = true
 				continue
 			}
@@ -124,16 +125,25 @@ func (q *Queue) worker(ctx context.Context) {
 		}
 
 		q.mu.Lock()
-		delete(q.running, job.Repo.Name)
+		delete(q.running, repoKey(job))
 		q.cond.Broadcast()
 		q.mu.Unlock()
 	}
 }
 
+// repoKey is the serialisation identity: the normalised clone URL, falling
+// back to the display name when Key is unset (unit-test fixtures).
+func repoKey(j Job) string {
+	if j.Repo.Key != "" {
+		return j.Repo.Key
+	}
+	return j.Repo.Name
+}
+
 // pickLocked returns the index of the oldest job whose repo is free, or -1.
 func pickLocked(pending []Job, running map[string]bool) int {
 	for i, j := range pending {
-		if !running[j.Repo.Name] {
+		if !running[repoKey(j)] {
 			return i
 		}
 	}

@@ -1,15 +1,15 @@
 # GitLab Webhook 自动镜像构建服务 — 配置示例
 #
-# 不需要罗列仓库：在 GitLab 任意项目上把 Webhook 指向本服务，
-# 即自动触发该项目的构建；仓库地址、分支、Commit 全部取自事件数据。
-# 唯一的准入条件是事件中的仓库地址属于下方 gitlab.host 域名。
+# 配置只有 server 与 code 两段：不维护仓库列表。在授权 GitLab 域名的任意
+# 项目添加 Webhook 即可接入；仓库地址、分支、Commit 全部取自事件数据，
+# 镜像名取自仓库名，Tag 取 Commit SHA 前 8 位，Dockerfile 用仓库根目录的。
 #
-# ${VAR} 占位符会在启动时从环境变量展开；引用未设置的环境变量将导致启动失败。
+# ${VAR} 占位符在启动时从环境变量展开；引用未设置的环境变量将启动失败。
 
 server:
   # HTTP 监听地址
   listen: ":8080"
-  # git clone 的工作区根目录（容器内路径）
+  # git clone 的工作区根目录（容器内路径，按仓库+构建任务隔离子目录）
   workspace: "/app/workspace"
   # 构建日志存放目录（容器内路径），每个构建对应 <build_id>.log
   logs_dir: "/app/logs"
@@ -18,41 +18,15 @@ server:
   # 全局并行构建数；同一仓库的任务始终串行执行
   concurrency: 2
 
-gitlab:
-  # GitLab 仓库所在的域名（二级域名，如 code.zmatrix.cn）。
-  # 只接受该域名下项目的 Webhook 事件，其余一律返回 host_not_allowed。
-  # 可填裸域名，也可填 https:// 地址；端口忽略（ssh 20022 也匹配）。
-  host: "code.zmatrix.cn"
+code:
   # Webhook Secret：与 GitLab Webhook 的 Secret token 完全一致
+  # （经 ${GITLAB_WEBHOOK_SECRET} 环境变量注入，未设置将启动失败）
   webhook_secret: "${GITLAB_WEBHOOK_SECRET}"
-
-# 全局构建配置：对所有被触发的仓库生效（无按仓库覆盖）
-build:
-  # 触发分支白名单：精确名称或通配符（如 release/*）
-  # 默认 ["main", "master"]
+  # 允许接入的 GitLab 实例域名（仓库地址域名必须等于它，否则拒绝）
+  # 支持标准 SSH / HTTP(S) 地址比较，端口不影响判定
+  domain: "code.gitlab.com"
+  # 触发分支白名单（精确匹配）：只有这些分支的 Push 会触发构建
+  # 省略时默认 ["main", "master"]
   branches:
     - "main"
-  # 分支正则门槛（默认匹配所有分支）：
-  # 分支需先通过此正则，再命中 branches 白名单才会构建
-  # branch_regex: "^release/.*"
-  # 镜像名前缀（可选）：最终镜像名 = 前缀 + 项目路径
-  # 如前缀 local/、项目路径 jmatrix/atlas-backend-api → local/jmatrix/atlas-backend-api
-  # image_prefix: "local/"
-  # Dockerfile 来源，默认 "auto"：
-  #   - auto           仓库根有 Dockerfile 就用它，否则按语言自动选模板
-  #                    （go.mod→go，pom.xml/build.gradle→java，package.json→node/vue）
-  #   - 模板名         go.Dockerfile / node.Dockerfile / vue.Dockerfile / java.Dockerfile
-  #   - 仓库内文件路径  如 Dockerfile.dev
-  dockerfile: "auto"
-  # 构建上下文（相对仓库根目录），默认 "."
-  # context: "."
-  # SSH Deploy Key 私钥路径（可选；为空则使用容器默认 ssh 身份）。
-  # 同一把 key 需有权限读取该 GitLab 实例上的所有被构建仓库
-  # deploy_key_path: "/run/secrets/gitlab_deploy_key"
-  # docker build --build-arg（可选，全局生效）
-  # args:
-  #   APP_VERSION: "1.0.0"
-  # 是否额外打 :latest 标签（可选，默认 false）
-  # tag_latest: true
-  # 是否禁用构建缓存（可选，默认 false）
-  # no_cache: false
+    - "master"

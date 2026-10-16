@@ -12,6 +12,9 @@ services:
     environment:
       # 与 GitLab Webhook 的 Secret token 保持一致（必填，用强随机值）
       GITLAB_WEBHOOK_SECRET: ${GITLAB_WEBHOOK_SECRET:?required - set a strong random secret}
+      # 可选：全局 SSH Deploy Key 私钥路径（需与下方 secrets 挂载路径一致）
+      # 例如 /run/secrets/gitlab_deploy_key；留空则使用容器默认 ssh 身份
+      GITLAB_DEPLOY_KEY_PATH: ${GITLAB_DEPLOY_KEY_PATH:-}
       # 可选：debug | info | warn | error
       LOG_LEVEL: ${LOG_LEVEL:-info}
     volumes:
