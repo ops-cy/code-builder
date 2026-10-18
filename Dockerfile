@@ -1,5 +1,12 @@
-# syntax=docker/dockerfile:1
 FROM golang:1.24-alpine AS build
+
+# 更换国内源下载
+ENV GOPROXY=https://goproxy.cn,direct
+ENV GOSUMDB=sum.golang.org
+
+# 更换国内源下载
+RUN sed -i 's#dl-cdn.alpinelinux.org#mirrors.ustc.edu.cn#g' /etc/apk/repositories \
+    && apk add --no-cache git openssh-client docker-cli ca-certificates tzdata
 
 WORKDIR /src
 
@@ -10,6 +17,10 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/gitlab-builder ./cmd/server
 
 FROM alpine:3.21
+
+# 国内源
+RUN sed -i 's#dl-cdn.alpinelinux.org#mirrors.ustc.edu.cn#g' /etc/apk/repositories \
+    && apk add --no-cache git openssh-client docker-cli ca-certificates tzdata
 
 RUN apk add --no-cache git openssh-client docker-cli ca-certificates tzdata
 
