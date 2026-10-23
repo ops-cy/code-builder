@@ -341,3 +341,51 @@ func Test_Webhook_when_QueueFull_thenReturn503(t *testing.T) {
 		t.Errorf("body = %s, want queue_full", w.Body.String())
 	}
 }
+
+func Test_Webhook_when_BuildTagConfigured_thenResponseUsesConfiguredTag(t *testing.T) {
+	// Given: build.tag replaces the commit-sha tag.
+	deps := newTestDeps(t, queue.New(1, 10))
+	deps.Build = config.BuildConfig{Tag: "latest"}
+	r := newRouter(deps)
+
+	// When
+	w := doWebhook(r, testSecret, pushBody(t, basePushEvent()))
+
+	// Then
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status = %d body = %s, want 202", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Tag string `json:"tag"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Tag != "latest" {
+		t.Errorf("tag = %q, want latest (configured build.tag)", resp.Tag)
+	}
+}
+
+func Test_Webhook_when_BranchTagOverride_thenResponseUsesOverride(t *testing.T) {
+	// Given: a per-branch override beats the global tag.
+	deps := newTestDeps(t, queue.New(1, 10))
+	deps.Build = config.BuildConfig{BranchTags: map[string]string{"main": "stable"}}
+	r := newRouter(deps)
+
+	// When
+	w := doWebhook(r, testSecret, pushBody(t, basePushEvent()))
+
+	// Then
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status = %d body = %s, want 202", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Tag string `json:"tag"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Tag != "stable" {
+		t.Errorf("tag = %q, want stable (branch override for main)", resp.Tag)
+	}
+}

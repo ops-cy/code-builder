@@ -4,12 +4,14 @@ GitLab Webhook 触发的**通用 Docker 镜像自动构建服务**。任何挂�
 
 ## 特性
 
-- **无需登记仓库**：配置只有 `server`、`code` 与可选的 `registry`，不维护仓库列表；唯一准入条件是事件中的仓库地址属于 `code.domain`
+- **无需登记仓库**：配置只有 `server`、`code` 与可选的 `build` / `registry` / `deploy`，不维护仓库列表；唯一准入条件是事件中的仓库地址属于 `code.domain`
 - **默认仅本地构建，可选推送**：不配置 `registry.url` 时镜像只留在构建机；配置后构建成功自动打远程 tag 并 push（`docker login` + `docker push`）
+- **标签可配置**：默认标签 = Commit SHA 前 8 位；`build.tag` 设全局固定标签、`build.branch_tags` 按分支覆盖（如 `pre: latest`、`main: stable`）
+- **构建后自动发布（可选）**：配置 `deploy` 后，当某次构建产出的标签等于 `deploy.tag`（默认 `latest`）时，对目标服务执行 `docker compose up -d`，直接使用刚构建出的本地镜像（不 pull）；发布失败不影响构建结果（构建仍成功，错误记入 `deploy_err`）
 - **Docker Socket 构建**：服务容器通过挂载 `/var/run/docker.sock` 调用宿主机 `docker build`
 - **SSH Deploy Key**：一把全局只读 Deploy Key（经 `GITLAB_DEPLOY_KEY_PATH` 环境变量注入）拉取该 GitLab 实例下所有被触发仓库
 - **分支白名单**：`code.branches` 精确匹配（默认 `main`、`master`）
-- **Commit SHA 精确构建**：按 webhook 推送的 `checkout_sha` 精确 checkout（校验 40/64 位十六进制），标签 = SHA 前 8 位
+- **Commit SHA 精确构建**：按 webhook 推送的 `checkout_sha` 精确 checkout（校验 40/64 位十六进制）；标签默认 = SHA 前 8 位，可经 `build.tag` / `build.branch_tags` 改为固定标签
 - **任务队列**：全局并发可配；**同一仓库（按归一化 URL）串行、不同仓库并行**
 - **重复投递去重**：同一仓库的同一 Commit 在排队/构建期间不会重复入队，重发返回 `duplicate`
 - **Webhook Secret 校验**：`X-Gitlab-Token` 恒定时比较，常数时间防时序攻击
@@ -25,9 +27,10 @@ flowchart LR
     WH --> Q[任务队列<br/>同仓库串行 · 多仓库并行]
     Q --> B[Builder 流水线]
     B -->|git clone + checkout SHA<br/>SSH Deploy Key| GC[构建工作区]
-    B -->|docker build -t image:sha8| DK[Docker 守护进程<br/>via /var/run/docker.sock]
-    DK --> IMG[本地镜像<br/>image:sha8]
+    B -->|docker build -t image:tag| DK[Docker 守护进程<br/>via /var/run/docker.sock]
+    DK --> IMG[本地镜像<br/>image:tag]
     B -.->|registry.url 已配置<br/>docker login + push| REG[镜像仓库<br/>可选]
+    B -.->|deploy.tag 匹配<br/>docker compose up -d| DEP[服务 compose<br/>/data/services<br/>可选]
     B --> L[构建日志<br/>/app/logs/&lt;build_id&gt;.log]
 ```
 
@@ -93,19 +96,25 @@ Webhook 响应状态：
 ## 镜像标签规则
 
 - **镜像名** = 仓库名（事件 `project.name`，转小写并规整为 Docker 合法字符 `[a-z0-9._-]`；URL 末段兜底）。不同仓库撞名时追加 `-<哈希8位>` 稳定后缀，不同项目绝不共享同一镜像名。
-- **标签** = Commit SHA 前 8 位，不附加分支名，不生成 `latest`。
-- **推送**（仅当 `registry.url` 非空）= 在本地 tag 之外再打一个远程 tag `<url>[/<project>]/<镜像名>:<sha8>` 并 `docker push`。
+- **标签**解析顺序：`build.branch_tags[分支]` → `build.tag` → Commit SHA 前 8 位。三者都未配置时保持旧的 SHA 前 8 位行为（不附加分支名）。标签必须是合法 Docker tag（`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$`）。
+- **推送**（仅当 `registry.url` 非空）= 在本地 tag 之外再打一个远程 tag `<url>[/<project>]/<镜像名>:<tag>` 并 `docker push`。
+- **发布**（仅当 `deploy.enabled` 且产出的 tag 等于 `deploy.tag`）= 在 `/data/services/<服务名>/<compose 文件>` 执行 `docker compose -p <项目名> up -d <服务名>`。
 
 推送 `main` 分支、commit `a1b2c3d4e5f6...`、项目 `Backend-API` 时：
 
 ```
+# 未配置 build.tag / branch_tags（默认）：
 backend-api:a1b2c3d4                              # 本地（始终）
 registry.example.com/tenants/backend-api:a1b2c3d4 # 远程（配置 registry.url 后）
+
+# 配置 build.branch_tags: {main: stable} 后：
+backend-api:stable                                # 本地（始终）
+registry.example.com/tenants/backend-api:stable   # 远程（配置 registry.url 后）
 ```
 
 ## 配置
 
-配置文件有 `server`、`code` 两段与可选的 `registry` 段，全部字段与中文注释见 [`config/config.yaml`](config/config.yaml)：
+配置文件有 `server`、`code` 两段与可选的 `build` / `registry` / `deploy` 段，全部字段与中文注释见 [`config/config.yaml`](config/config.yaml)：
 
 ```yaml
 server:
@@ -120,12 +129,29 @@ code:
   domain: "code.gitlab.com"
   branches: ["main", "master"]
 
+# 可选；省略 = 标签默认取 Commit SHA 前 8 位
+build:
+  tag: ""                      # 全局默认标签，例: latest
+  branch_tags: {}              # 按分支覆盖，例: {main: stable, pre: latest}
+
 # 可选；省略或不填 url = 仅本地构建（默认）
 registry:
   url: ""            # 填了才推送，例: registry.example.com
   project: ""        # 可选镜像名前缀，例: tenants
   username: ""       # 与 password 成对出现；都填则推送前 docker login
   password: ""       # 建议用 ${REGISTRY_PASSWORD} 环境变量注入
+
+# 可选；省略或 enabled:false = 不自动发布
+deploy:
+  enabled: false
+  services_dir: "/data/services"     # 每服务一个子目录；需同路径挂载进容器
+  compose_file: "docker-compose.yaml" # 该目录内 compose 文件名（缺失时自动找 compose.yaml 等）
+  project_name: ""                    # 留空 = 服务目录名
+  tag: "latest"                       # 仅当产出标签等于它时发布
+  wait: false                         # up -d 后是否等待健康（--wait --wait-timeout）
+  wait_timeout: "120s"
+  # services:                         # 可选：按服务名覆盖路径/服务键/项目名/compose 文件名
+  #   ex-backend: {dir: ex-backend, service: ex-backend}
 ```
 
 ## 构建文件选择

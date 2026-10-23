@@ -1,8 +1,9 @@
 # GitLab Webhook 自动镜像构建服务 — 配置示例
 #
-# 配置只有 server 与 code 两段：不维护仓库列表。在授权 GitLab 域名的任意
-# 项目添加 Webhook 即可接入；仓库地址、分支、Commit 全部取自事件数据，
-# 镜像名取自仓库名，Tag 取 Commit SHA 前 8 位，Dockerfile 用仓库根目录的。
+# 配置分为 server / code / build / registry / deploy 五段：不维护仓库列表。
+# 在授权 GitLab 域名的任意项目添加 Webhook 即可接入；仓库地址、分支、Commit
+# 全部取自事件数据，镜像名取自仓库名，Dockerfile 用仓库根目录的（缺失时套内置模板）。
+# Tag 默认取 Commit SHA 前 8 位；配置 build.tag / build.branch_tags 可改为固定 tag。
 #
 # ${VAR} 占位符在启动时从环境变量展开；引用未设置的环境变量将启动失败。
 
@@ -31,6 +32,16 @@ code:
     - "main"
     - "master"
 
+# 镜像 Tag 策略（可选）。默认（整段省略）沿用 Commit SHA 前 8 位。
+# 配置任一字段后即替代 commit tag：
+#   解析顺序：branch_tags[分支] → build.tag → SHA 前 8 位（兜底）
+build:
+  # 所有分支的默认 tag（例: latest / stable / v1.2.3）
+  tag: ""
+  # 按分支覆盖 tag（精确匹配），优先于 build.tag
+  # 例: { "pre": "latest", "main": "stable" }
+  branch_tags: {}
+
 # 镜像推送（可选）。不写这一段 = 只构建本地镜像（默认，行为与以前完全一致）。
 # 填写 registry.url 即启用：构建成功后打远程 tag 并推送。
 # 判定规则：url 非空 → 推送；url 为空或缺省 → 仅本地。
@@ -44,3 +55,32 @@ registry:
   # 建议 password 用 ${REGISTRY_PASSWORD} 由环境变量注入（未设置将启动失败）。
   username: ""
   password: ""
+
+# 构建后自动发布（可选）。开启后，当某次构建产出的 tag 等于 deploy.tag 时，
+# 对目标服务执行 `docker compose -f <服务目录>/<compose 文件> -p <项目> up -d <服务>`，
+# 直接使用刚构建出的本地镜像（不 pull）。部署失败不影响构建结果（构建仍 success，
+# 错误记录在 build 的 deploy_err 字段）。
+#
+# 目录约定：/data/services/<服务名>/docker-compose.yaml，目录名 = 镜像名 = compose 服务名。
+# 该目录必须以【相同路径】挂载进本容器（见 docker-compose.yml 的 /data/services）。
+deploy:
+  # 是否开启自动发布
+  enabled: false
+  # 服务目录根（容器内路径，需与宿主机同路径挂载）
+  services_dir: "/data/services"
+  # 每个服务目录内的 compose 文件名；缺失时自动尝试 compose.yaml 等标准名
+  compose_file: "docker-compose.yaml"
+  # compose 项目名；留空 = 服务目录名（compose 自身默认）
+  project_name: ""
+  # 仅当构建产出的 tag 等于它时才发布（通常为 latest）
+  tag: "latest"
+  # up -d 后是否等待容器健康（追加 --wait --wait-timeout）
+  wait: false
+  wait_timeout: "120s"
+  # 可选：按服务名覆盖目录/服务键/项目名/ compose 文件名（默认同上约定）
+  # services:
+  #   ex-backend:
+  #     dir: "ex-backend"
+  #     service: "ex-backend"
+  #     project_name: "ex-backend"
+  #     compose_file: "docker-compose.yaml"

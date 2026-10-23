@@ -22,6 +22,7 @@ type Request struct {
 	Repo      config.Repository
 	Branch    string
 	SHA       string
+	Tag       string // resolved image tag (config-driven; sha8 when unset)
 	Log       *os.File
 	Workspace string
 	// Registry is the optional push target; when its URL is empty the image
@@ -68,7 +69,7 @@ func Build(ctx context.Context, req Request) ([]string, error) {
 	}
 	fmt.Fprintf(req.Log, "==> dockerfile source=%s path=%s\n", dockerfileSource, dockerfileAbs)
 
-	tags, pushRefs, login, err := imageRefs(req.Repo.Build.Image, req.SHA, req.Registry)
+	tags, pushRefs, login, err := imageRefs(req.Repo.Build.Image, req.Tag, req.Registry)
 	if err != nil {
 		return nil, fmt.Errorf("builder: %w", err)
 	}
@@ -90,21 +91,21 @@ func Build(ctx context.Context, req Request) ([]string, error) {
 	return tags, nil
 }
 
-// imageRefs turns a repository image name and commit sha into the full set of
-// docker tag arguments, the subset to push, and the optional registry login. It
-// is pure (no docker, no git) so the push composition is unit-testable:
-//   - local tag          {image}:{sha8}                     (always)
-//   - remote ref         {url}[/{project}]/{image}:{sha8}   (only when enabled)
-//   - login              set only when a username is configured
-func imageRefs(image, sha string, reg config.RegistryConfig) (tags, pushRefs []string, login *dockerLogin, err error) {
-	tags, err = TagsFor(image, sha)
-	if err != nil {
+// imageRefs composes the docker tag arguments, the subset to push, and the
+// optional registry login from an image name and an already-resolved tag. It is
+// pure (no docker, no git) so the push composition is unit-testable:
+//   - local tag   {image}:{tag}                     (always)
+//   - remote ref  {url}[/{project}]/{image}:{tag}   (only when enabled)
+//   - login       set only when a username is configured
+func imageRefs(image, tag string, reg config.RegistryConfig) (tags, pushRefs []string, login *dockerLogin, err error) {
+	if err := config.ValidateTag(tag); err != nil {
 		return nil, nil, nil, err
 	}
+	tags = []string{image + ":" + tag}
 	if !reg.Enabled() {
 		return tags, nil, nil, nil
 	}
-	remote := reg.RemoteRef(image, sha[:8])
+	remote := reg.RemoteRef(image, tag)
 	tags = append(tags, remote)
 	pushRefs = append(pushRefs, remote)
 	if reg.Username != "" {
@@ -115,22 +116,6 @@ func imageRefs(image, sha string, reg config.RegistryConfig) (tags, pushRefs []s
 		}
 	}
 	return tags, pushRefs, login, nil
-}
-
-// TagsFor computes the single image tag: {image}:{first 8 chars of the full
-// commit SHA}. The SHA must already be a full hex object id; the same
-// validation that guards webhook acceptance is re-checked defensively here.
-func TagsFor(image, sha string) ([]string, error) {
-	if len(sha) < 8 {
-		return nil, fmt.Errorf("commit sha %q too short for an 8-char tag", sha)
-	}
-	for _, r := range sha[:8] {
-		isHex := (r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')
-		if !isHex {
-			return nil, fmt.Errorf("commit sha %q is not hexadecimal", sha)
-		}
-	}
-	return []string{fmt.Sprintf("%s:%s", image, sha[:8])}, nil
 }
 
 // workspaceDir returns the per-task clone directory:

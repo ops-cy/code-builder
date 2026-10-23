@@ -20,58 +20,26 @@ func TestMain(m *testing.M) {
 
 const sha40 = "a1b2c3d4e5f67890a1b2c3d4e5f67890a1b2c3d4"
 
-func Test_TagsFor(t *testing.T) {
+func Test_imageRefs_rejects_invalid_tag(t *testing.T) {
 	tests := []struct {
 		name    string
-		image   string
-		sha     string
-		want    []string
+		tag     string
 		wantErr bool
 	}{
-		{
-			name:  "tag is first 8 chars of the full commit sha",
-			image: "backend-api",
-			sha:   sha40,
-			want:  []string{"backend-api:a1b2c3d4"},
-		},
-		{
-			name:  "image with path separator keeps its prefix",
-			image: "local/app",
-			sha:   "0123456789abcdef0123456789abcdef01234567",
-			want:  []string{"local/app:01234567"},
-		},
-		{
-			name:    "sha shorter than tag length rejected",
-			image:   "app",
-			sha:     "abc",
-			wantErr: true,
-		},
-		{
-			name:    "non-hex sha rejected",
-			image:   "app",
-			sha:     "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
-			wantErr: true,
-		},
+		{name: "empty tag", tag: "", wantErr: true},
+		{name: "leading dot", tag: ".beta", wantErr: true},
+		{name: "leading dash", tag: "-beta", wantErr: true},
+		{name: "slash in tag", tag: "v1/beta", wantErr: true},
+		{name: "space in tag", tag: "v1 beta", wantErr: true},
+		{name: "latest ok", tag: "latest", wantErr: false},
+		{name: "sha8 ok", tag: "a1b2c3d4", wantErr: false},
+		{name: "semver ok", tag: "v1.2.3", wantErr: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := TagsFor(tt.image, tt.sha)
-			if tt.wantErr {
-				if err == nil {
-					t.Fatalf("TagsFor() = %v, want error", got)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("TagsFor() error = %v", err)
-			}
-			if len(got) != len(tt.want) {
-				t.Fatalf("TagsFor() = %v, want %v", got, tt.want)
-			}
-			for i := range got {
-				if got[i] != tt.want[i] {
-					t.Errorf("TagsFor()[%d] = %q, want %q", i, got[i], tt.want[i])
-				}
+			_, _, _, err := imageRefs("app", tt.tag, config.RegistryConfig{})
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("imageRefs(%q) err = %v, wantErr = %v", tt.tag, err, tt.wantErr)
 			}
 		})
 	}
@@ -283,7 +251,7 @@ func Test_imageRefs(t *testing.T) {
 	tests := []struct {
 		name      string
 		image     string
-		sha       string
+		tag       string
 		reg       config.RegistryConfig
 		wantTags  []string
 		wantPush  []string
@@ -293,46 +261,53 @@ func Test_imageRefs(t *testing.T) {
 		{
 			name:     "registry disabled yields only the local tag",
 			image:    "app",
-			sha:      sha40,
+			tag:      "latest",
+			reg:      config.RegistryConfig{},
+			wantTags: []string{"app:latest"},
+		},
+		{
+			name:     "sha8 tag still works",
+			image:    "app",
+			tag:      "a1b2c3d4",
 			reg:      config.RegistryConfig{},
 			wantTags: []string{"app:a1b2c3d4"},
 		},
 		{
 			name:     "url only adds a remote ref without login",
 			image:    "app",
-			sha:      sha40,
+			tag:      "latest",
 			reg:      config.RegistryConfig{URL: "registry.example.com"},
-			wantTags: []string{"app:a1b2c3d4", "registry.example.com/app:a1b2c3d4"},
-			wantPush: []string{"registry.example.com/app:a1b2c3d4"},
+			wantTags: []string{"app:latest", "registry.example.com/app:latest"},
+			wantPush: []string{"registry.example.com/app:latest"},
 		},
 		{
 			name:     "project and tolerated slashes become a path segment",
 			image:    "app",
-			sha:      sha40,
+			tag:      "latest",
 			reg:      config.RegistryConfig{URL: "registry.example.com/", Project: "/tenants/"},
-			wantTags: []string{"app:a1b2c3d4", "registry.example.com/tenants/app:a1b2c3d4"},
-			wantPush: []string{"registry.example.com/tenants/app:a1b2c3d4"},
+			wantTags: []string{"app:latest", "registry.example.com/tenants/app:latest"},
+			wantPush: []string{"registry.example.com/tenants/app:latest"},
 		},
 		{
 			name:      "credentials add a login",
 			image:     "app",
-			sha:       sha40,
+			tag:       "latest",
 			reg:       config.RegistryConfig{URL: "registry.example.com", Username: "u", Password: "p"},
-			wantTags:  []string{"app:a1b2c3d4", "registry.example.com/app:a1b2c3d4"},
-			wantPush:  []string{"registry.example.com/app:a1b2c3d4"},
+			wantTags:  []string{"app:latest", "registry.example.com/app:latest"},
+			wantPush:  []string{"registry.example.com/app:latest"},
 			wantLogin: true,
 		},
 		{
-			name:    "invalid sha rejected before composing refs",
+			name:    "empty tag rejected",
 			image:   "app",
-			sha:     "abc",
+			tag:     "",
 			reg:     config.RegistryConfig{URL: "registry.example.com"},
 			wantErr: true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tags, push, login, err := imageRefs(tt.image, tt.sha, tt.reg)
+			tags, push, login, err := imageRefs(tt.image, tt.tag, tt.reg)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("imageRefs() err = nil, want error")

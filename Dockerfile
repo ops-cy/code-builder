@@ -20,9 +20,7 @@ FROM alpine:3.21
 
 # 国内源
 RUN sed -i 's#dl-cdn.alpinelinux.org#mirrors.ustc.edu.cn#g' /etc/apk/repositories \
-    && apk add --no-cache git openssh-client docker-cli ca-certificates tzdata
-
-RUN apk add --no-cache git openssh-client docker-cli ca-certificates tzdata
+    && apk add --no-cache git openssh-client docker-cli docker-cli-compose ca-certificates tzdata
 
 COPY --from=build /out/gitlab-builder /usr/local/bin/gitlab-builder
 

@@ -14,6 +14,7 @@ import (
 
 	"gitlab-builder/internal/builder"
 	"gitlab-builder/internal/config"
+	"gitlab-builder/internal/deploy"
 	"gitlab-builder/internal/gitx"
 	"gitlab-builder/internal/queue"
 	"gitlab-builder/internal/store"
@@ -40,6 +41,8 @@ type Deps struct {
 	Logger        *slog.Logger
 	Workspace     string
 	Registry      config.RegistryConfig // optional image push target (URL-gated)
+	Build         config.BuildConfig    // tag policy (defaults to sha8 when empty)
+	Deploy        config.DeployConfig   // optional post-build compose up -d
 }
 
 // Handler returns the gin handler for POST /webhook. The dedup table and
@@ -104,6 +107,7 @@ func Handler(deps Deps) gin.HandlerFunc {
 			c.JSON(http.StatusAccepted, gin.H{"status": "ignored", "reason": "invalid commit sha"})
 			return
 		}
+		tag := deps.Build.ResolveTag(branch, sha)
 
 		// Redelivery guard: the same commit of the same repository must not
 		// be built twice while its build is still queued or running.
@@ -127,7 +131,7 @@ func Handler(deps Deps) gin.HandlerFunc {
 		})
 		dup.put(dkey, build.ID)
 
-		run := pipeline(deps, build.ID, repo, branch, sha)
+		run := pipeline(deps, build.ID, repo, branch, sha, tag)
 		job := queue.Job{
 			BuildID: build.ID,
 			Repo:    repo,
@@ -166,7 +170,7 @@ func Handler(deps Deps) gin.HandlerFunc {
 			"branch":   branch,
 			"sha":      sha,
 			"image":    repo.Build.Image,
-			"tag":      sha[:8],
+			"tag":      tag,
 		})
 	}
 }
@@ -187,8 +191,11 @@ func validCommitSHA(s string) bool {
 }
 
 // pipeline returns the job runner: mark running, build with timeout, record
-// result and full reason in both the build log and the store.
-func pipeline(deps Deps, buildID string, repo config.Repository, branch, sha string) func(context.Context) error {
+// result and full reason in both the build log and the store. When deployment
+// is enabled and the resolved tag matches deploy.tag, it also brings the
+// service up from the freshly built local image. A deploy failure is recorded
+// in DeployError but never downgrades a successful build.
+func pipeline(deps Deps, buildID string, repo config.Repository, branch, sha, tag string) func(context.Context) error {
 	return func(ctx context.Context) error {
 		started := time.Now()
 		deps.Store.Update(buildID, func(b *store.Build) {
@@ -207,8 +214,8 @@ func pipeline(deps Deps, buildID string, repo config.Repository, branch, sha str
 		}
 		defer logf.Close()
 
-		fmt.Fprintf(logf, "build %s repo=%s url=%s branch=%s sha=%s image=%s\n",
-			buildID, repo.Name, gitx.MaskURL(repo.URL), branch, sha, repo.Build.Image)
+		fmt.Fprintf(logf, "build %s repo=%s url=%s branch=%s sha=%s image=%s tag=%s\n",
+			buildID, repo.Name, gitx.MaskURL(repo.URL), branch, sha, repo.Build.Image, tag)
 
 		bctx, cancel := context.WithTimeout(ctx, buildTimeout)
 		defer cancel()
@@ -216,6 +223,7 @@ func pipeline(deps Deps, buildID string, repo config.Repository, branch, sha str
 			Repo:      repo,
 			Branch:    branch,
 			SHA:       sha,
+			Tag:       tag,
 			Log:       logf,
 			Workspace: deps.Workspace,
 			Registry:  deps.Registry,
@@ -235,11 +243,36 @@ func pipeline(deps Deps, buildID string, repo config.Repository, branch, sha str
 				slog.Any("err", err))
 			return err
 		}
+
 		deps.Store.Update(buildID, func(b *store.Build) {
 			b.Status = store.StatusSuccess
 			b.ImageTags = tags
-			b.FinishedAt = time.Now()
 		})
+
+		if deps.Deploy.Enabled && tag == deps.Deploy.Tag {
+			if derr := deploy.Up(ctx, deploy.Request{
+				Service: repo.Build.Image,
+				Config:  deps.Deploy,
+				Log:     logf,
+			}); derr != nil {
+				deps.Store.Update(buildID, func(b *store.Build) { b.DeployError = derr.Error() })
+				fmt.Fprintf(logf, "==> deploy failed service=%s error=%s\n", repo.Build.Image, derr)
+				deps.Logger.ErrorContext(ctx, "deploy failed",
+					slog.String("build_id", buildID),
+					slog.String("repo", repo.Name),
+					slog.String("service", repo.Build.Image),
+					slog.Any("err", derr))
+			} else {
+				deps.Store.Update(buildID, func(b *store.Build) { b.Deployed = true })
+				fmt.Fprintf(logf, "==> deploy success service=%s\n", repo.Build.Image)
+				deps.Logger.InfoContext(ctx, "deploy succeeded",
+					slog.String("build_id", buildID),
+					slog.String("repo", repo.Name),
+					slog.String("service", repo.Build.Image))
+			}
+		}
+
+		deps.Store.Update(buildID, func(b *store.Build) { b.FinishedAt = time.Now() })
 		fmt.Fprintf(logf, "==> result success duration=%s image=%s\n", duration, strings.Join(tags, ", "))
 		deps.Logger.InfoContext(ctx, "build succeeded",
 			slog.String("build_id", buildID),

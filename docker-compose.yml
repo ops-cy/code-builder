@@ -28,6 +28,9 @@ services:
       # 构建工作区与构建日志（持久化）
       - ./data:/app/workspace
       - ./logs:/app/logs
+      # 服务目录（deploy.services_dir）：必须与宿主机同路径挂载，
+      # 否则 compose 的相对路径（.env / env_file / bind mount）会解析错
+      - /data/services:/data/services:ro
       # Docker Socket：服务通过宿主机 Docker 守护进程执行 docker build；
       # 默认仅本地，配置 registry.url 后可 docker login + push
       - /var/run/docker.sock:/var/run/docker.sock

@@ -62,6 +62,8 @@ func main() {
 		Logger:        logger,
 		Workspace:     cfg.Server.Workspace,
 		Registry:      cfg.Registry,
+		Build:         cfg.Build,
+		Deploy:        cfg.Deploy,
 	}
 	if err := server.New(cfg, logger, deps).Run(ctx); err != nil {
 		logger.Error("server exited", slog.Any("err", err))

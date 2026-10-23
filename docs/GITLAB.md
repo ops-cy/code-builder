@@ -68,9 +68,11 @@ curl http://<构建机IP>:8080/api/builds/<build_id>/log
 ```
 
 构建成功后在构建机执行 `docker images` 可看到
-`<仓库名>:<commit SHA 前 8 位>` 镜像。默认仅本地；若 `config.yaml` 配置了
-`registry.url`，同一镜像还会以 `<url>[/<project>]/<仓库名>:<sha8>` 推送到镜像仓库（日志中
-`==> registry push enabled remote=...` 一行可见）。
+`<仓库名>:<标签>` 镜像（标签默认 = commit SHA 前 8 位，配置 `build.tag` /
+`build.branch_tags` 后为固定标签，如 `latest`）。默认仅本地；若 `config.yaml` 配置了
+`registry.url`，同一镜像还会以 `<url>[/<project>]/<仓库名>:<标签>` 推送到镜像仓库（日志中
+`==> registry push enabled remote=...` 一行可见）。若配置了 `deploy.enabled` 且产出标签等于
+`deploy.tag`，服务还会对该服务目录执行 `docker compose up -d`（日志中 `==> deploy command: ...` 一行可见）。
 
 ## 5. 准入与触发策略速查
 
@@ -87,12 +89,23 @@ code:
     - "main"
     - "master"
 
+# 可选：配置标签策略；省略则标签取 Commit SHA 前 8 位
+# build:
+#   tag: "latest"                 # 全局默认标签
+#   branch_tags: {main: "stable"} # 按分支覆盖（精确匹配）
+
 # 可选：配置 url 后构建成功自动推送，省略则仅本地构建
 # registry:
 #   url: "registry.example.com"
 #   project: "tenants"
 #   username: "ci"
 #   password: "${REGISTRY_PASSWORD}"
+
+# 可选：产出标签等于 tag 时自动发布（docker compose up -d）
+# deploy:
+#   enabled: true
+#   services_dir: "/data/services"
+#   tag: "latest"
 ```
 
 - `feature/x` 的 Push → 不在白名单 → **不构建**（`branch_filtered`）
