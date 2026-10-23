@@ -84,3 +84,22 @@ deploy:
   #     service: "ex-backend"
   #     project_name: "ex-backend"
   #     compose_file: "docker-compose.yaml"
+
+# 流水线通知（可选）。省略或 enabled:false = 不发送任何通知。
+# 卡片格式与 Jenkins 共享库一致：标题 / 项目名称 / 构建发起 / 当前版本 / 持续时间 /
+# 提交摘要 / 错误摘要 / 推送时间。通知失败不影响构建结果（记入 build 的 NotifyError）。
+notify:
+  # 是否开启通知
+  enabled: false
+  # 各事件开关（省略 = true）
+  on_started: true      # 🚀 流水线开始
+  on_success: true      # ✅ 流水线成功（含“部署失败”提示）
+  on_failure: true      # ❌ 流水线失败
+  lark:
+    # 飞书自定义机器人 Webhook，直接写在这里（含 token，属敏感信息，不会写入日志）。
+    # 例: "https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+    webhook_url: ""
+    # 可选：机器人开启“签名校验”时填写密钥
+    secret: ""
+    # 单次投递超时
+    timeout: "10s"

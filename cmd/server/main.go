@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	"gitlab-builder/internal/config"
+	"gitlab-builder/internal/notify"
 	"gitlab-builder/internal/queue"
 	"gitlab-builder/internal/server"
 	"gitlab-builder/internal/store"
@@ -64,6 +65,7 @@ func main() {
 		Registry:      cfg.Registry,
 		Build:         cfg.Build,
 		Deploy:        cfg.Deploy,
+		Notify:        notify.New(cfg.Notify, logger),
 	}
 	if err := server.New(cfg, logger, deps).Run(ctx); err != nil {
 		logger.Error("server exited", slog.Any("err", err))

@@ -16,6 +16,7 @@ import (
 	"gitlab-builder/internal/config"
 	"gitlab-builder/internal/deploy"
 	"gitlab-builder/internal/gitx"
+	"gitlab-builder/internal/notify"
 	"gitlab-builder/internal/queue"
 	"gitlab-builder/internal/store"
 
@@ -43,6 +44,7 @@ type Deps struct {
 	Registry      config.RegistryConfig // optional image push target (URL-gated)
 	Build         config.BuildConfig    // tag policy (defaults to sha8 when empty)
 	Deploy        config.DeployConfig   // optional post-build compose up -d
+	Notify        notify.Sender         // optional pipeline notifications (nil = off)
 }
 
 // Handler returns the gin handler for POST /webhook. The dedup table and
@@ -122,12 +124,14 @@ func Handler(deps Deps) gin.HandlerFunc {
 
 		repo.DeployKeyPath = deps.DeployKeyPath
 		build := deps.Store.Create(store.Build{
-			Repo:      repo.Name,
-			Branch:    branch,
-			SHA:       sha,
-			ShortSHA:  sha[:8],
-			Status:    store.StatusQueued,
-			CreatedAt: time.Now(),
+			Repo:          repo.Name,
+			Branch:        branch,
+			SHA:           sha,
+			ShortSHA:      sha[:8],
+			Actor:         ev.actor(),
+			CommitSubject: ev.commitSubject(sha),
+			Status:        store.StatusQueued,
+			CreatedAt:     time.Now(),
 		})
 		dup.put(dkey, build.ID)
 
@@ -149,6 +153,7 @@ func Handler(deps Deps) gin.HandlerFunc {
 				b.Error = err.Error()
 				b.FinishedAt = time.Now()
 			})
+			notifyEvent(deps, build.ID, notify.EventFailure, err.Error(), "")
 			logger.ErrorContext(c.Request.Context(), "webhook: enqueue failed",
 				slog.String("build_id", build.ID),
 				slog.String("reason", err.Error()),
@@ -202,6 +207,7 @@ func pipeline(deps Deps, buildID string, repo config.Repository, branch, sha, ta
 			b.Status = store.StatusRunning
 			b.StartedAt = time.Now()
 		})
+		notifyEvent(deps, buildID, notify.EventStarted, "", "")
 
 		logf, err := deps.Store.OpenLog(buildID)
 		if err != nil {
@@ -210,6 +216,7 @@ func pipeline(deps Deps, buildID string, repo config.Repository, branch, sha, ta
 				b.Error = err.Error()
 				b.FinishedAt = time.Now()
 			})
+			notifyEvent(deps, buildID, notify.EventFailure, err.Error(), "")
 			return fmt.Errorf("open log: %w", err)
 		}
 		defer logf.Close()
@@ -241,6 +248,7 @@ func pipeline(deps Deps, buildID string, repo config.Repository, branch, sha, ta
 				slog.String("repo", repo.Name),
 				slog.Duration("duration", duration),
 				slog.Any("err", err))
+			notifyEvent(deps, buildID, notify.EventFailure, err.Error(), "")
 			return err
 		}
 
@@ -249,12 +257,14 @@ func pipeline(deps Deps, buildID string, repo config.Repository, branch, sha, ta
 			b.ImageTags = tags
 		})
 
+		deployErr := ""
 		if deps.Deploy.Enabled && tag == deps.Deploy.Tag {
 			if derr := deploy.Up(ctx, deploy.Request{
 				Service: repo.Build.Image,
 				Config:  deps.Deploy,
 				Log:     logf,
 			}); derr != nil {
+				deployErr = derr.Error()
 				deps.Store.Update(buildID, func(b *store.Build) { b.DeployError = derr.Error() })
 				fmt.Fprintf(logf, "==> deploy failed service=%s error=%s\n", repo.Build.Image, derr)
 				deps.Logger.ErrorContext(ctx, "deploy failed",
@@ -279,6 +289,44 @@ func pipeline(deps Deps, buildID string, repo config.Repository, branch, sha, ta
 			slog.String("repo", repo.Name),
 			slog.String("tags", strings.Join(tags, ",")),
 			slog.Duration("duration", duration))
+		notifyEvent(deps, buildID, notify.EventSuccess, "", deployErr)
 		return nil
 	}
+}
+
+// notifyEvent sends one pipeline notification without blocking or affecting the
+// build: delivery failures are logged and recorded in Build.NotifyError only.
+func notifyEvent(deps Deps, buildID string, ev notify.Event, errMsg, deployErr string) {
+	if deps.Notify == nil || !deps.Notify.Wants(ev) {
+		return
+	}
+	b, ok := deps.Store.Get(buildID)
+	if !ok {
+		return
+	}
+	var dur time.Duration
+	if !b.StartedAt.IsZero() {
+		end := b.FinishedAt
+		if end.IsZero() {
+			end = time.Now()
+		}
+		dur = end.Sub(b.StartedAt)
+	}
+	deps.Notify.Async(notify.Message{
+		Event:     ev,
+		App:       b.Repo,
+		Actor:     b.Actor,
+		Branch:    b.Branch,
+		ShortSHA:  b.ShortSHA,
+		Duration:  dur,
+		Subject:   b.CommitSubject,
+		Err:       errMsg,
+		DeployErr: deployErr,
+		Now:       time.Now(),
+	}, func(err error) {
+		if err == nil {
+			return
+		}
+		deps.Store.Update(buildID, func(bb *store.Build) { bb.NotifyError = err.Error() })
+	})
 }

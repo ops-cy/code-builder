@@ -8,6 +8,7 @@ GitLab Webhook 触发的**通用 Docker 镜像自动构建服务**。任何挂�
 - **默认仅本地构建，可选推送**：不配置 `registry.url` 时镜像只留在构建机；配置后构建成功自动打远程 tag 并 push（`docker login` + `docker push`）
 - **标签可配置**：默认标签 = Commit SHA 前 8 位；`build.tag` 设全局固定标签、`build.branch_tags` 按分支覆盖（如 `pre: latest`、`main: stable`）
 - **构建后自动发布（可选）**：配置 `deploy` 后，当某次构建产出的标签等于 `deploy.tag`（默认 `latest`）时，对目标服务执行 `docker compose up -d`，直接使用刚构建出的本地镜像（不 pull）；发布失败不影响构建结果（构建仍成功，错误记入 `deploy_err`）
+- **流水线通知（可选）**：配置 `notify.lark.webhook_url` 后，向飞书群机器人推送流水线开始 / 成功 / 失败卡片，字段与 Jenkins 共享库一致（项目名称、构建发起、当前版本 `分支-短SHA`、持续时间、提交摘要、错误摘要、推送时间）；部署失败会在成功卡片中追加提示；通知失败不影响构建（记入 `NotifyError`）
 - **Docker Socket 构建**：服务容器通过挂载 `/var/run/docker.sock` 调用宿主机 `docker build`
 - **SSH Deploy Key**：一把全局只读 Deploy Key（经 `GITLAB_DEPLOY_KEY_PATH` 环境变量注入）拉取该 GitLab 实例下所有被触发仓库
 - **分支白名单**：`code.branches` 精确匹配（默认 `main`、`master`）
@@ -114,7 +115,7 @@ registry.example.com/tenants/backend-api:stable   # 远程（配置 registry.url
 
 ## 配置
 
-配置文件有 `server`、`code` 两段与可选的 `build` / `registry` / `deploy` 段，全部字段与中文注释见 [`config/config.yaml`](config/config.yaml)：
+配置文件有 `server`、`code` 两段与可选的 `build` / `registry` / `deploy` / `notify` 段，全部字段与中文注释见 [`config/config.yaml`](config/config.yaml)：
 
 ```yaml
 server:
@@ -152,6 +153,17 @@ deploy:
   wait_timeout: "120s"
   # services:                         # 可选：按服务名覆盖路径/服务键/项目名/compose 文件名
   #   ex-backend: {dir: ex-backend, service: ex-backend}
+
+# 可选；省略或 enabled:false = 不发送通知
+notify:
+  enabled: false
+  on_started: true                   # 🚀 流水线开始
+  on_success: true                   # ✅ 流水线成功（含“部署失败”提示）
+  on_failure: true                   # ❌ 流水线失败
+  lark:
+    webhook_url: ""                  # 飞书机器人 Webhook（直接写配置；敏感，不落日志）
+    secret: ""                       # 可选：签名校验密钥
+    timeout: "10s"                   # 单次投递超时
 ```
 
 ## 构建文件选择

@@ -554,3 +554,168 @@ func Test_ExampleConfig_Loads(t *testing.T) {
 		t.Errorf("deploy.compose_file = %q, want docker-compose.yaml default", cfg.Deploy.ComposeFile)
 	}
 }
+
+func Test_Load_when_NotifyDefaults_thenAllEventsAnd10s(t *testing.T) {
+	// Given: notify section omitted entirely.
+	path := writeConfig(t, `
+code:
+  webhook_secret: "x"
+  domain: "example.com"
+`)
+
+	// When
+	cfg, err := Load(path)
+
+	// Then
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Notify.Enabled {
+		t.Error("notify should be disabled by default")
+	}
+	if !cfg.Notify.Started() || !cfg.Notify.Success() || !cfg.Notify.Failure() {
+		t.Error("event switches should default to true")
+	}
+	if cfg.Notify.Lark.Timeout != "10s" {
+		t.Errorf("timeout = %q, want 10s", cfg.Notify.Lark.Timeout)
+	}
+}
+
+func Test_Load_when_NotifyEnabled_thenSwitchesRespected(t *testing.T) {
+	// Given
+	path := writeConfig(t, `
+code:
+  webhook_secret: "x"
+  domain: "example.com"
+notify:
+  enabled: true
+  on_started: false
+  lark:
+    webhook_url: "https://open.feishu.cn/open-apis/bot/v2/hook/token"
+`)
+
+	// When
+	cfg, err := Load(path)
+
+	// Then
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !cfg.Notify.LarkEnabled() {
+		t.Error("lark should be enabled")
+	}
+	if cfg.Notify.Started() {
+		t.Error("on_started=false must disable the start notification")
+	}
+	if !cfg.Notify.Success() || !cfg.Notify.Failure() {
+		t.Error("omitted switches must stay true")
+	}
+}
+
+func Test_Load_when_NotifyEnabledWithoutWebhook_thenError(t *testing.T) {
+	// Given
+	path := writeConfig(t, `
+code:
+  webhook_secret: "x"
+  domain: "example.com"
+notify:
+  enabled: true
+`)
+
+	// When
+	_, err := Load(path)
+
+	// Then
+	if err == nil {
+		t.Fatal("Load() error = nil, want missing webhook_url error")
+	}
+}
+
+func Test_Load_when_NotifyWebhookNotHTTPS_thenError(t *testing.T) {
+	// Given
+	path := writeConfig(t, `
+code:
+  webhook_secret: "x"
+  domain: "example.com"
+notify:
+  enabled: true
+  lark:
+    webhook_url: "http://open.feishu.cn/open-apis/bot/v2/hook/token"
+`)
+
+	// When
+	_, err := Load(path)
+
+	// Then
+	if err == nil {
+		t.Fatal("Load() error = nil, want https requirement error")
+	}
+}
+
+func Test_Load_when_NotifyAllEventsOff_thenError(t *testing.T) {
+	// Given
+	path := writeConfig(t, `
+code:
+  webhook_secret: "x"
+  domain: "example.com"
+notify:
+  enabled: true
+  on_started: false
+  on_success: false
+  on_failure: false
+  lark:
+    webhook_url: "https://open.feishu.cn/open-apis/bot/v2/hook/token"
+`)
+
+	// When
+	_, err := Load(path)
+
+	// Then
+	if err == nil {
+		t.Fatal("Load() error = nil, want all-events-off error")
+	}
+}
+
+func Test_Load_when_NotifyBadTimeout_thenError(t *testing.T) {
+	// Given
+	path := writeConfig(t, `
+code:
+  webhook_secret: "x"
+  domain: "example.com"
+notify:
+  enabled: true
+  lark:
+    webhook_url: "https://open.feishu.cn/open-apis/bot/v2/hook/token"
+    timeout: "notaduration"
+`)
+
+	// When
+	_, err := Load(path)
+
+	// Then
+	if err == nil {
+		t.Fatal("Load() error = nil, want invalid timeout error")
+	}
+}
+
+func Test_Load_when_NotifyDisabled_thenValidationSkipped(t *testing.T) {
+	// Given: bogus values on a disabled notifier must not fail boot.
+	path := writeConfig(t, `
+code:
+  webhook_secret: "x"
+  domain: "example.com"
+notify:
+  enabled: false
+  lark:
+    webhook_url: "http://insecure"
+    timeout: "notaduration"
+`)
+
+	// When
+	_, err := Load(path)
+
+	// Then
+	if err != nil {
+		t.Fatalf("Load() error = %v, want nil while notify disabled", err)
+	}
+}

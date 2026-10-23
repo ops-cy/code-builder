@@ -4,14 +4,18 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"gitlab-builder/internal/config"
+	"gitlab-builder/internal/notify"
 	"gitlab-builder/internal/queue"
 	"gitlab-builder/internal/store"
 
@@ -66,6 +70,16 @@ func basePushEvent() map[string]any {
 		"before":       "1111111111111111111111111111111111111111",
 		"after":        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		"checkout_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"user_name":    "Hunter",
+		"commits": []map[string]any{
+			{
+				"id":        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				"message":   "feat: 关闭页面权限校验\n\nbody line",
+				"title":     "feat: 关闭页面权限校验",
+				"timestamp": "2026-10-23T13:28:02+08:00",
+				"author":    map[string]any{"name": "Hunter"},
+			},
+		},
 		"project": map[string]any{
 			"name":                "app",
 			"path_with_namespace": "group/app",
@@ -388,4 +402,162 @@ func Test_Webhook_when_BranchTagOverride_thenResponseUsesOverride(t *testing.T) 
 	if resp.Tag != "stable" {
 		t.Errorf("tag = %q, want stable (branch override for main)", resp.Tag)
 	}
+}
+
+// stubNotifier records notifications synchronously so tests observe them
+// without waiting on goroutines.
+type stubNotifier struct {
+	mu   sync.Mutex
+	msgs []notify.Message
+	err  error
+}
+
+func (s *stubNotifier) Wants(notify.Event) bool { return true }
+
+func (s *stubNotifier) Async(msg notify.Message, onErr func(error)) {
+	s.mu.Lock()
+	s.msgs = append(s.msgs, msg)
+	err := s.err
+	s.mu.Unlock()
+	if err != nil && onErr != nil {
+		onErr(err)
+	}
+}
+
+func (s *stubNotifier) messages() []notify.Message {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]notify.Message(nil), s.msgs...)
+}
+
+func Test_Webhook_when_Queued_thenRecordsActorAndCommitSubject(t *testing.T) {
+	// Given
+	deps := newTestDeps(t, queue.New(1, 10))
+	r := newRouter(deps)
+
+	// When
+	w := doWebhook(r, testSecret, pushBody(t, basePushEvent()))
+
+	// Then
+	var resp struct {
+		BuildID string `json:"build_id"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	b, ok := deps.Store.Get(resp.BuildID)
+	if !ok {
+		t.Fatal("build not in store")
+	}
+	if b.Actor != "Hunter" {
+		t.Errorf("Actor = %q, want Hunter (event user_name)", b.Actor)
+	}
+	if b.CommitSubject != "feat: 关闭页面权限校验" {
+		t.Errorf("CommitSubject = %q, want first line of the commit", b.CommitSubject)
+	}
+}
+
+func Test_Webhook_when_QueueFull_thenNotifiesFailure(t *testing.T) {
+	// Given: the queue is already full, so the build fails before running.
+	q := queue.New(1, 1)
+	if err := q.Enqueue(queue.Job{Repo: testRepo(), Run: func(context.Context) error { return nil }}); err != nil {
+		t.Fatal(err)
+	}
+	deps := newTestDeps(t, q)
+	stub := &stubNotifier{}
+	deps.Notify = stub
+	r := newRouter(deps)
+
+	// When
+	w := doWebhook(r, testSecret, pushBody(t, basePushEvent()))
+
+	// Then
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", w.Code)
+	}
+	msgs := stub.messages()
+	if len(msgs) != 1 {
+		t.Fatalf("notifications = %d, want 1", len(msgs))
+	}
+	if msgs[0].Event != notify.EventFailure {
+		t.Errorf("event = %q, want failure", msgs[0].Event)
+	}
+	if !strings.Contains(msgs[0].Err, "full") {
+		t.Errorf("Err = %q, want the queue-full reason", msgs[0].Err)
+	}
+	if msgs[0].App != "app" {
+		t.Errorf("App = %q, want app", msgs[0].App)
+	}
+}
+
+func Test_notifyEvent_when_Success_thenMessageCarriesBuildData(t *testing.T) {
+	// Given
+	deps := newTestDeps(t, queue.New(1, 10))
+	stub := &stubNotifier{}
+	deps.Notify = stub
+	b := deps.Store.Create(store.Build{
+		Repo:          "app",
+		Branch:        "develop",
+		ShortSHA:      "d8f8dddf",
+		Actor:         "Hunter",
+		CommitSubject: "feat: x",
+	})
+	start := time.Now().Add(-2 * time.Second)
+	deps.Store.Update(b.ID, func(bb *store.Build) {
+		bb.StartedAt = start
+		bb.FinishedAt = start.Add(2 * time.Second)
+	})
+
+	// When
+	notifyEvent(deps, b.ID, notify.EventSuccess, "", "compose down")
+
+	// Then
+	msgs := stub.messages()
+	if len(msgs) != 1 {
+		t.Fatalf("notifications = %d, want 1", len(msgs))
+	}
+	m := msgs[0]
+	if m.Event != notify.EventSuccess || m.App != "app" || m.Actor != "Hunter" {
+		t.Errorf("msg = %+v", m)
+	}
+	if m.Branch != "develop" || m.ShortSHA != "d8f8dddf" || m.Subject != "feat: x" {
+		t.Errorf("msg = %+v, want branch/sha/subject from the build", m)
+	}
+	if m.Duration != 2*time.Second {
+		t.Errorf("Duration = %v, want 2s (finished - started)", m.Duration)
+	}
+	if m.DeployErr != "compose down" {
+		t.Errorf("DeployErr = %q, want compose down", m.DeployErr)
+	}
+}
+
+func Test_notifyEvent_when_DeliveryFails_thenNotifyErrorRecorded(t *testing.T) {
+	// Given
+	deps := newTestDeps(t, queue.New(1, 10))
+	deps.Notify = &stubNotifier{err: errors.New("bad gateway")}
+	b := deps.Store.Create(store.Build{Repo: "app", Status: store.StatusFailed})
+
+	// When
+	notifyEvent(deps, b.ID, notify.EventFailure, "boom", "")
+
+	// Then
+	got, ok := deps.Store.Get(b.ID)
+	if !ok {
+		t.Fatal("build not in store")
+	}
+	if !strings.Contains(got.NotifyError, "bad gateway") {
+		t.Errorf("NotifyError = %q, want delivery error", got.NotifyError)
+	}
+	if got.Status != store.StatusFailed {
+		t.Errorf("Status = %q, notify failure must not change build state", got.Status)
+	}
+}
+
+func Test_notifyEvent_when_NilNotifier_thenSafe(t *testing.T) {
+	// Given
+	deps := newTestDeps(t, queue.New(1, 10))
+	b := deps.Store.Create(store.Build{Repo: "app"})
+
+	// When / Then: must not panic with notifications unconfigured.
+	notifyEvent(deps, b.ID, notify.EventStarted, "", "")
 }

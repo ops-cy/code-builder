@@ -3,6 +3,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -21,6 +22,7 @@ type Config struct {
 	Build    BuildConfig    `yaml:"build"`
 	Registry RegistryConfig `yaml:"registry"`
 	Deploy   DeployConfig   `yaml:"deploy"`
+	Notify   NotifyConfig   `yaml:"notify"`
 }
 
 // ServerConfig holds HTTP listener and workspace settings.
@@ -148,6 +150,46 @@ type DeployService struct {
 	ComposeFile string `yaml:"compose_file"`
 }
 
+// NotifyConfig controls pipeline notifications (optional). Event switches use
+// pointers so an omitted key keeps the Jenkins-compatible default (true) while
+// an explicit false disables that event.
+type NotifyConfig struct {
+	// Enabled turns the notifier on. When false, nothing is sent.
+	Enabled bool `yaml:"enabled"`
+	// OnStarted / OnSuccess / OnFailure select which events notify (default true).
+	OnStarted *bool `yaml:"on_started"`
+	OnSuccess *bool `yaml:"on_success"`
+	OnFailure *bool `yaml:"on_failure"`
+	// Lark is the Lark (Feishu) custom-bot channel; an empty webhook disables it.
+	Lark LarkConfig `yaml:"lark"`
+}
+
+// LarkConfig is one Lark (Feishu) custom-bot webhook.
+type LarkConfig struct {
+	// WebhookURL is the full bot hook URL, e.g.
+	// https://open.feishu.cn/open-apis/bot/v2/hook/<token>. It is a secret:
+	// it is never written to logs.
+	WebhookURL string `yaml:"webhook_url"`
+	// Secret enables Lark's signature verification when non-empty.
+	Secret string `yaml:"secret"`
+	// Timeout bounds one delivery attempt (default 10s).
+	Timeout string `yaml:"timeout"`
+}
+
+// Started reports whether the pipeline-start event notifies (default true).
+func (n NotifyConfig) Started() bool { return n.OnStarted == nil || *n.OnStarted }
+
+// Success reports whether the success event notifies (default true).
+func (n NotifyConfig) Success() bool { return n.OnSuccess == nil || *n.OnSuccess }
+
+// Failure reports whether the failure event notifies (default true).
+func (n NotifyConfig) Failure() bool { return n.OnFailure == nil || *n.OnFailure }
+
+// LarkEnabled reports whether notifications are enabled and a webhook exists.
+func (n NotifyConfig) LarkEnabled() bool {
+	return n.Enabled && strings.TrimSpace(n.Lark.WebhookURL) != ""
+}
+
 // tagPattern matches a valid Docker tag: starts alphanumeric/underscore and is
 // at most 128 chars of [A-Za-z0-9_.-].
 var tagPattern = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$`)
@@ -265,6 +307,9 @@ func (c *Config) applyDefaults() {
 	if c.Deploy.WaitTimeout == "" {
 		c.Deploy.WaitTimeout = "120s"
 	}
+	if c.Notify.Lark.Timeout == "" {
+		c.Notify.Lark.Timeout = "10s"
+	}
 }
 
 func (c Config) validate() error {
@@ -304,6 +349,33 @@ func (c Config) validate() error {
 	}
 	if err := c.Deploy.validate(); err != nil {
 		return err
+	}
+	if err := c.Notify.validate(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validate checks the notify section; a disabled notifier is never validated so
+// a half-configured channel cannot block boot.
+func (n NotifyConfig) validate() error {
+	if !n.Enabled {
+		return nil
+	}
+	raw := strings.TrimSpace(n.Lark.WebhookURL)
+	if raw == "" {
+		return fmt.Errorf("config: notify.enabled requires notify.lark.webhook_url")
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.Host == "" {
+		return fmt.Errorf("config: notify.lark.webhook_url must be an https URL")
+	}
+	if !n.Started() && !n.Success() && !n.Failure() {
+		return fmt.Errorf("config: notify.enabled but on_started/on_success/on_failure are all false")
+	}
+	d, err := time.ParseDuration(n.Lark.Timeout)
+	if err != nil || d <= 0 {
+		return fmt.Errorf("config: notify.lark.timeout %q is not a valid duration", n.Lark.Timeout)
 	}
 	return nil
 }

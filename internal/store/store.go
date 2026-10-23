@@ -26,20 +26,23 @@ const (
 
 // Build is one build record.
 type Build struct {
-	ID          string
-	Repo        string
-	Branch      string
-	SHA         string
-	ShortSHA    string
-	Status      Status
-	ImageTags   []string
-	Deployed    bool   // true when a post-build deploy succeeded
-	DeployError string // non-empty when the build succeeded but deploy failed
-	Error       string
-	LogPath     string
-	CreatedAt   time.Time
-	StartedAt   time.Time
-	FinishedAt  time.Time
+	ID            string
+	Repo          string
+	Branch        string
+	SHA           string
+	ShortSHA      string
+	Actor         string // push initiator from the webhook event
+	CommitSubject string // one-line commit summary from the webhook event
+	Status        Status
+	ImageTags     []string
+	Deployed      bool   // true when a post-build deploy succeeded
+	DeployError   string // non-empty when the build succeeded but deploy failed
+	NotifyError   string // non-empty when a notification could not be delivered
+	Error         string
+	LogPath       string
+	CreatedAt     time.Time
+	StartedAt     time.Time
+	FinishedAt    time.Time
 }
 
 // Store is a concurrency-safe in-memory registry of builds; log bodies live
