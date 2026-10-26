@@ -1,4 +1,4 @@
-FROM golang:1.24-alpine AS build
+FROM golang:1.25-alpine AS build
 
 # 更换国内源下载
 ENV GOPROXY=https://goproxy.cn,direct
