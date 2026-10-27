@@ -3,7 +3,9 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 func writeConfig(t *testing.T, content string) string {
@@ -16,7 +18,7 @@ func writeConfig(t *testing.T, content string) string {
 }
 
 func Test_Load_when_ValidYAMLWithEnvExpansion_thenReturnExpandedConfig(t *testing.T) {
-	// Given
+	// 前提
 	t.Setenv("TEST_WEBHOOK_SECRET", "s3cret")
 	path := writeConfig(t, `
 server:
@@ -28,10 +30,10 @@ code:
   branches: ["main"]
 `)
 
-	// When
+	// 操作
 	cfg, err := Load(path)
 
-	// Then
+	// 断言
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
@@ -59,17 +61,17 @@ code:
 }
 
 func Test_Load_when_OmittedOptionalFields_thenReturnDocumentedDefaults(t *testing.T) {
-	// Given: branches omitted → default whitelist; queue_size omitted → 10.
+	// 前提：省略 branches → 使用默认白名单；省略 queue_size → 10。
 	path := writeConfig(t, `
 code:
   webhook_secret: "x"
   domain: "example.com"
 `)
 
-	// When
+	// 操作
 	cfg, err := Load(path)
 
-	// Then
+	// 断言
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
@@ -82,19 +84,19 @@ code:
 }
 
 func Test_Load_when_CommentMentionsPlaceholder_ThenNotExpanded(t *testing.T) {
-	// Given: the example config documents ${VAR} syntax inside a comment line.
+	// 前提：示例配置在注释行中演示了 ${VAR} 语法。
 	t.Setenv("TEST_WEBHOOK_SECRET", "from-env")
 	path := writeConfig(t, `
-# ${VAR} is documented here and must not be expanded.
+# 这里演示 ${VAR} 语法，不能被展开。
 code:
   webhook_secret: "${TEST_WEBHOOK_SECRET}"
   domain: "example.com"
 `)
 
-	// When
+	// 操作
 	cfg, err := Load(path)
 
-	// Then
+	// 断言
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
@@ -104,58 +106,58 @@ code:
 }
 
 func Test_Load_when_UnsetEnvVar_thenReturnError(t *testing.T) {
-	// Given
+	// 前提
 	path := writeConfig(t, `
 code:
   webhook_secret: "${DEFINITELY_NOT_SET_VAR_XYZ}"
   domain: "example.com"
 `)
 
-	// When
+	// 操作
 	_, err := Load(path)
 
-	// Then
+	// 断言
 	if err == nil {
 		t.Fatal("Load() error = nil, want unset env var error")
 	}
 }
 
 func Test_Load_when_MissingSecret_thenReturnError(t *testing.T) {
-	// Given
+	// 前提
 	path := writeConfig(t, `
 code:
   webhook_secret: ""
   domain: "example.com"
 `)
 
-	// When
+	// 操作
 	_, err := Load(path)
 
-	// Then
+	// 断言
 	if err == nil {
 		t.Fatal("Load() error = nil, want secret required error")
 	}
 }
 
 func Test_Load_when_MissingDomain_thenReturnError(t *testing.T) {
-	// Given
+	// 前提
 	path := writeConfig(t, `
 code:
   webhook_secret: "x"
   domain: ""
 `)
 
-	// When
+	// 操作
 	_, err := Load(path)
 
-	// Then
+	// 断言
 	if err == nil {
 		t.Fatal("Load() error = nil, want domain required error")
 	}
 }
 
 func Test_Load_when_EmptyBranchEntry_thenReturnError(t *testing.T) {
-	// Given
+	// 前提
 	path := writeConfig(t, `
 code:
   webhook_secret: "x"
@@ -165,17 +167,17 @@ code:
     - ""
 `)
 
-	// When
+	// 操作
 	_, err := Load(path)
 
-	// Then
+	// 断言
 	if err == nil {
 		t.Fatal("Load() error = nil, want empty branch entry error")
 	}
 }
 
 func Test_Load_when_RegistryConfigured_thenEnabledWithRemoteRef(t *testing.T) {
-	// Given
+	// 前提
 	t.Setenv("TEST_REGISTRY_PASSWORD", "p@ss")
 	path := writeConfig(t, `
 code:
@@ -188,10 +190,10 @@ registry:
   password: "${TEST_REGISTRY_PASSWORD}"
 `)
 
-	// When
+	// 操作
 	cfg, err := Load(path)
 
-	// Then
+	// 断言
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
@@ -207,17 +209,17 @@ registry:
 }
 
 func Test_Load_when_RegistryOmitted_thenDisabled(t *testing.T) {
-	// Given
+	// 前提
 	path := writeConfig(t, `
 code:
   webhook_secret: "x"
   domain: "example.com"
 `)
 
-	// When
+	// 操作
 	cfg, err := Load(path)
 
-	// Then
+	// 断言
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
@@ -227,7 +229,7 @@ code:
 }
 
 func Test_Load_when_RegistryUsernameWithoutPassword_thenReturnError(t *testing.T) {
-	// Given
+	// 前提
 	path := writeConfig(t, `
 code:
   webhook_secret: "x"
@@ -237,17 +239,17 @@ registry:
   username: "ci"
 `)
 
-	// When
+	// 操作
 	_, err := Load(path)
 
-	// Then
+	// 断言
 	if err == nil {
 		t.Fatal("Load() error = nil, want username/password pairing error")
 	}
 }
 
 func Test_Load_when_RegistryPasswordWithoutUsername_thenReturnError(t *testing.T) {
-	// Given
+	// 前提
 	path := writeConfig(t, `
 code:
   webhook_secret: "x"
@@ -257,17 +259,17 @@ registry:
   password: "p@ss"
 `)
 
-	// When
+	// 操作
 	_, err := Load(path)
 
-	// Then
+	// 断言
 	if err == nil {
 		t.Fatal("Load() error = nil, want username/password pairing error")
 	}
 }
 
 func Test_Load_when_RegistryCredsWithoutURL_thenReturnError(t *testing.T) {
-	// Given: credentials are meaningless without a push target.
+	// 前提：没有推送目标时，凭据没有意义。
 	path := writeConfig(t, `
 code:
   webhook_secret: "x"
@@ -277,10 +279,10 @@ registry:
   password: "p@ss"
 `)
 
-	// When
+	// 操作
 	_, err := Load(path)
 
-	// Then
+	// 断言
 	if err == nil {
 		t.Fatal("Load() error = nil, want creds-without-url error")
 	}
@@ -295,18 +297,18 @@ func Test_BuildConfig_ResolveTag(t *testing.T) {
 		want   string
 	}{
 		{
-			name:   "nothing configured keeps the sha8 behaviour",
+			name:   "nothing configured defaults to latest",
 			cfg:    BuildConfig{},
 			branch: "main",
 			sha:    "a1b2c3d4e5f6",
-			want:   "a1b2c3d4",
+			want:   "latest",
 		},
 		{
-			name:   "short sha returned verbatim",
+			name:   "short sha still defaults to latest",
 			cfg:    BuildConfig{},
 			branch: "main",
 			sha:    "abc",
-			want:   "abc",
+			want:   "latest",
 		},
 		{
 			name:   "global tag applies to every branch",
@@ -347,7 +349,7 @@ func Test_BuildConfig_ResolveTag(t *testing.T) {
 }
 
 func Test_Load_when_BuildTagsConfigured_thenApplied(t *testing.T) {
-	// Given
+	// 前提
 	path := writeConfig(t, `
 code:
   webhook_secret: "x"
@@ -358,10 +360,10 @@ build:
     main: "stable"
 `)
 
-	// When
+	// 操作
 	cfg, err := Load(path)
 
-	// Then
+	// 断言
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
@@ -374,7 +376,7 @@ build:
 }
 
 func Test_Load_when_BuildTagInvalid_thenReturnError(t *testing.T) {
-	// Given
+	// 前提
 	path := writeConfig(t, `
 code:
   webhook_secret: "x"
@@ -383,17 +385,17 @@ build:
   tag: "-bad"
 `)
 
-	// When
+	// 操作
 	_, err := Load(path)
 
-	// Then
+	// 断言
 	if err == nil {
 		t.Fatal("Load() error = nil, want invalid build.tag error")
 	}
 }
 
 func Test_Load_when_BranchTagInvalid_thenReturnError(t *testing.T) {
-	// Given
+	// 前提
 	path := writeConfig(t, `
 code:
   webhook_secret: "x"
@@ -403,141 +405,25 @@ build:
     main: "v1/beta"
 `)
 
-	// When
+	// 操作
 	_, err := Load(path)
 
-	// Then
+	// 断言
 	if err == nil {
 		t.Fatal("Load() error = nil, want invalid branch tag error")
 	}
 }
 
-func Test_Load_when_DeployEnabled_thenDefaultsApplied(t *testing.T) {
-	// Given
-	path := writeConfig(t, `
-code:
-  webhook_secret: "x"
-  domain: "example.com"
-deploy:
-  enabled: true
-`)
-
-	// When
-	cfg, err := Load(path)
-
-	// Then
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if !cfg.Deploy.Enabled {
-		t.Error("deploy should be enabled")
-	}
-	if cfg.Deploy.ServicesDir != "/data/services" {
-		t.Errorf("ServicesDir = %q, want /data/services", cfg.Deploy.ServicesDir)
-	}
-	if cfg.Deploy.ComposeFile != "docker-compose.yaml" {
-		t.Errorf("ComposeFile = %q, want docker-compose.yaml", cfg.Deploy.ComposeFile)
-	}
-	if cfg.Deploy.Tag != "latest" {
-		t.Errorf("Tag = %q, want latest", cfg.Deploy.Tag)
-	}
-	if cfg.Deploy.WaitTimeout != "120s" {
-		t.Errorf("WaitTimeout = %q, want 120s", cfg.Deploy.WaitTimeout)
-	}
-}
-
-func Test_Load_when_DeployDisabled_thenValidationSkipped(t *testing.T) {
-	// Given: a bogus duration on a disabled deploy must not fail boot.
-	path := writeConfig(t, `
-code:
-  webhook_secret: "x"
-  domain: "example.com"
-deploy:
-  enabled: false
-  wait_timeout: "notaduration"
-`)
-
-	// When
-	_, err := Load(path)
-
-	// Then
-	if err != nil {
-		t.Fatalf("Load() error = %v, want nil while deploy disabled", err)
-	}
-}
-
-func Test_Load_when_DeployEnabledBadWaitTimeout_thenReturnError(t *testing.T) {
-	// Given
-	path := writeConfig(t, `
-code:
-  webhook_secret: "x"
-  domain: "example.com"
-deploy:
-  enabled: true
-  wait_timeout: "notaduration"
-`)
-
-	// When
-	_, err := Load(path)
-
-	// Then
-	if err == nil {
-		t.Fatal("Load() error = nil, want invalid wait_timeout error")
-	}
-}
-
-func Test_Load_when_DeployEnabledBadTag_thenReturnError(t *testing.T) {
-	// Given
-	path := writeConfig(t, `
-code:
-  webhook_secret: "x"
-  domain: "example.com"
-deploy:
-  enabled: true
-  tag: "-bad"
-`)
-
-	// When
-	_, err := Load(path)
-
-	// Then
-	if err == nil {
-		t.Fatal("Load() error = nil, want invalid deploy.tag error")
-	}
-}
-
-func Test_Load_when_DeployServiceDirEscapes_thenReturnError(t *testing.T) {
-	// Given
-	path := writeConfig(t, `
-code:
-  webhook_secret: "x"
-  domain: "example.com"
-deploy:
-  enabled: true
-  services:
-    evil:
-      dir: "../evil"
-`)
-
-	// When
-	_, err := Load(path)
-
-	// Then
-	if err == nil {
-		t.Fatal("Load() error = nil, want path-element error")
-	}
-}
-
-// Test_ExampleConfig_Loads guards the shipped config/config.yaml: it must stay
-// loadable (valid YAML, resolvable placeholders, defaults applied).
+// Test_ExampleConfig_Loads 守护随附的 config/config.yaml：它必须保持
+// 可加载（YAML 合法、占位符可解析、默认值已应用）。
 func Test_ExampleConfig_Loads(t *testing.T) {
-	// Given: the example references ${GITLAB_WEBHOOK_SECRET}.
+	// 前提：示例配置引用了 ${GITLAB_WEBHOOK_SECRET}。
 	t.Setenv("GITLAB_WEBHOOK_SECRET", "example-secret")
 
-	// When
+	// 操作
 	cfg, err := Load(filepath.Join("..", "..", "config", "config.yaml"))
 
-	// Then
+	// 断言
 	if err != nil {
 		t.Fatalf("Load(config/config.yaml) error = %v", err)
 	}
@@ -547,26 +433,20 @@ func Test_ExampleConfig_Loads(t *testing.T) {
 	if cfg.Registry.Enabled() {
 		t.Errorf("registry should be disabled by default, got url=%q", cfg.Registry.URL)
 	}
-	if cfg.Deploy.Enabled {
-		t.Error("deploy should be disabled by default")
-	}
-	if cfg.Deploy.ComposeFile != "docker-compose.yaml" {
-		t.Errorf("deploy.compose_file = %q, want docker-compose.yaml default", cfg.Deploy.ComposeFile)
-	}
 }
 
 func Test_Load_when_NotifyDefaults_thenAllEventsAnd10s(t *testing.T) {
-	// Given: notify section omitted entirely.
+	// 前提：完全省略 notify 配置段。
 	path := writeConfig(t, `
 code:
   webhook_secret: "x"
   domain: "example.com"
 `)
 
-	// When
+	// 操作
 	cfg, err := Load(path)
 
-	// Then
+	// 断言
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
@@ -582,7 +462,7 @@ code:
 }
 
 func Test_Load_when_NotifyEnabled_thenSwitchesRespected(t *testing.T) {
-	// Given
+	// 前提
 	path := writeConfig(t, `
 code:
   webhook_secret: "x"
@@ -594,10 +474,10 @@ notify:
     webhook_url: "https://open.feishu.cn/open-apis/bot/v2/hook/token"
 `)
 
-	// When
+	// 操作
 	cfg, err := Load(path)
 
-	// Then
+	// 断言
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
@@ -613,7 +493,7 @@ notify:
 }
 
 func Test_Load_when_NotifyEnabledWithoutWebhook_thenError(t *testing.T) {
-	// Given
+	// 前提
 	path := writeConfig(t, `
 code:
   webhook_secret: "x"
@@ -622,17 +502,17 @@ notify:
   enabled: true
 `)
 
-	// When
+	// 操作
 	_, err := Load(path)
 
-	// Then
+	// 断言
 	if err == nil {
 		t.Fatal("Load() error = nil, want missing webhook_url error")
 	}
 }
 
 func Test_Load_when_NotifyWebhookNotHTTPS_thenError(t *testing.T) {
-	// Given
+	// 前提
 	path := writeConfig(t, `
 code:
   webhook_secret: "x"
@@ -643,17 +523,17 @@ notify:
     webhook_url: "http://open.feishu.cn/open-apis/bot/v2/hook/token"
 `)
 
-	// When
+	// 操作
 	_, err := Load(path)
 
-	// Then
+	// 断言
 	if err == nil {
 		t.Fatal("Load() error = nil, want https requirement error")
 	}
 }
 
 func Test_Load_when_NotifyAllEventsOff_thenError(t *testing.T) {
-	// Given
+	// 前提
 	path := writeConfig(t, `
 code:
   webhook_secret: "x"
@@ -667,17 +547,17 @@ notify:
     webhook_url: "https://open.feishu.cn/open-apis/bot/v2/hook/token"
 `)
 
-	// When
+	// 操作
 	_, err := Load(path)
 
-	// Then
+	// 断言
 	if err == nil {
 		t.Fatal("Load() error = nil, want all-events-off error")
 	}
 }
 
 func Test_Load_when_NotifyBadTimeout_thenError(t *testing.T) {
-	// Given
+	// 前提
 	path := writeConfig(t, `
 code:
   webhook_secret: "x"
@@ -689,17 +569,17 @@ notify:
     timeout: "notaduration"
 `)
 
-	// When
+	// 操作
 	_, err := Load(path)
 
-	// Then
+	// 断言
 	if err == nil {
 		t.Fatal("Load() error = nil, want invalid timeout error")
 	}
 }
 
 func Test_Load_when_NotifyDisabled_thenValidationSkipped(t *testing.T) {
-	// Given: bogus values on a disabled notifier must not fail boot.
+	// 前提：已禁用的通知器上的无意义取值不得导致启动失败。
 	path := writeConfig(t, `
 code:
   webhook_secret: "x"
@@ -711,11 +591,305 @@ notify:
     timeout: "notaduration"
 `)
 
-	// When
+	// 操作
 	_, err := Load(path)
 
-	// Then
+	// 断言
 	if err != nil {
 		t.Fatalf("Load() error = %v, want nil while notify disabled", err)
+	}
+}
+
+func Test_Load_when_TimeoutsOmitted_thenDefaults(t *testing.T) {
+	// 前提
+	path := writeConfig(t, `
+code:
+  webhook_secret: "x"
+  domain: "example.com"
+`)
+
+	// 操作
+	cfg, err := Load(path)
+
+	// 断言
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got := cfg.Timeouts.CloneDuration(); got != 15*time.Minute {
+		t.Errorf("CloneDuration() = %v, want 15m", got)
+	}
+	if got := cfg.Timeouts.BuildDuration(); got != 25*time.Minute {
+		t.Errorf("BuildDuration() = %v, want 25m", got)
+	}
+	if got := cfg.Timeouts.JobDuration(); got != 30*time.Minute {
+		t.Errorf("JobDuration() = %v, want 30m", got)
+	}
+	if got := cfg.Timeouts.DeployDuration(); got != 5*time.Minute {
+		t.Errorf("DeployDuration() = %v, want 5m", got)
+	}
+}
+
+func Test_Load_when_TimeoutsConfigured_thenApplied(t *testing.T) {
+	// 前提
+	path := writeConfig(t, `
+code:
+  webhook_secret: "x"
+  domain: "example.com"
+timeouts:
+  clone: "90s"
+  build: "40m"
+  job: "45m"
+  deploy: "2m"
+`)
+
+	// 操作
+	cfg, err := Load(path)
+
+	// 断言
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Timeouts.CloneDuration() != 90*time.Second || cfg.Timeouts.BuildDuration() != 40*time.Minute {
+		t.Errorf("timeouts = %+v, want clone 90s build 40m", cfg.Timeouts)
+	}
+	if cfg.Timeouts.JobDuration() != 45*time.Minute || cfg.Timeouts.DeployDuration() != 2*time.Minute {
+		t.Errorf("timeouts = %+v, want job 45m deploy 2m", cfg.Timeouts)
+	}
+}
+
+func Test_Load_when_TimeoutInvalid_thenError(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{"not a duration", `timeouts: {clone: "soon"}`},
+		{"zero", `timeouts: {build: "0s"}`},
+		{"negative", `timeouts: {job: "-1m"}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := writeConfig(t, "code:\n  webhook_secret: \"x\"\n  domain: \"example.com\"\n"+tt.body+"\n")
+			if _, err := Load(path); err == nil {
+				t.Fatal("Load() error = nil, want timeout error")
+			}
+		})
+	}
+}
+
+const deployConfigHead = `
+code:
+  webhook_secret: "x"
+  domain: "example.com"
+deploy:
+  enabled: true
+  targets:
+`
+
+func Test_Load_when_DeployTargetsConfigured_thenLookupIgnoresCase(t *testing.T) {
+	// 前提
+	dir := filepath.ToSlash(filepath.Join(t.TempDir(), "atlas-market"))
+	path := writeConfig(t, deployConfigHead+
+		"    Atlas-Market:\n"+
+		"      dir: \""+dir+"\"\n"+
+		"      compose_file: \"docker-compose.yaml\"\n"+
+		"      service: \"api\"\n"+
+		"      tag: \"ignored\"\n")
+
+	// 操作
+	cfg, err := Load(path)
+
+	// 断言
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !cfg.Deploy.Enabled {
+		t.Fatal("Deploy.Enabled = false")
+	}
+	for _, key := range []string{"atlas-market", "ATLAS-MARKET", " Atlas-Market "} {
+		tgt, ok := cfg.Deploy.Target(key)
+		if !ok {
+			t.Errorf("Target(%q) not found", key)
+			continue
+		}
+		if tgt.Dir != dir || tgt.ComposeFile != "docker-compose.yaml" || tgt.Service != "api" {
+			t.Errorf("Target(%q) = %+v", key, tgt)
+		}
+	}
+	if _, ok := cfg.Deploy.Target("other"); ok {
+		t.Error("Target(other) found, want miss")
+	}
+}
+
+func Test_Load_when_DeployDisabled_thenValidationSkipped(t *testing.T) {
+	// 前提：在禁用状态下，残留或不完整的 targets 不得阻塞启动。
+	path := writeConfig(t, `
+code:
+  webhook_secret: "x"
+  domain: "example.com"
+deploy:
+  enabled: false
+  targets:
+    Bad Name:
+      dir: "relative/dir"
+`)
+
+	// 操作
+	_, err := Load(path)
+
+	// 断言
+	if err != nil {
+		t.Fatalf("Load() error = %v, want nil while deploy disabled", err)
+	}
+}
+
+func Test_Load_when_DeployInvalid_thenError(t *testing.T) {
+	abs := filepath.ToSlash(filepath.Join(t.TempDir(), "app"))
+	tests := []struct {
+		name   string
+		target string
+	}{
+		{
+			name: "no targets",
+			target: `
+`,
+		},
+		{
+			name: "duplicate case-insensitive key",
+			target: `    atlas:
+      dir: "{{DIR}}"
+      compose_file: "docker-compose.yaml"
+    ATLAS:
+      dir: "{{DIR}}"
+      compose_file: "docker-compose.yaml"
+`,
+		},
+		{
+			name: "invalid name",
+			target: `    "bad name":
+      dir: "{{DIR}}"
+      compose_file: "docker-compose.yaml"
+`,
+		},
+		{
+			name: "missing dir",
+			target: `    app:
+      compose_file: "docker-compose.yaml"
+`,
+		},
+		{
+			name: "relative dir",
+			target: `    app:
+      dir: "./services/app"
+      compose_file: "docker-compose.yaml"
+`,
+		},
+		{
+			name: "missing compose file",
+			target: `    app:
+      dir: "{{DIR}}"
+`,
+		},
+		{
+			name: "compose file with path",
+			target: `    app:
+      dir: "{{DIR}}"
+      compose_file: "sub/docker-compose.yaml"
+`,
+		},
+		{
+			name: "invalid service",
+			target: `    app:
+      dir: "{{DIR}}"
+      compose_file: "docker-compose.yaml"
+      service: "bad service"
+`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := strings.ReplaceAll(tt.target, "{{DIR}}", abs)
+			path := writeConfig(t, deployConfigHead+body)
+			if _, err := Load(path); err == nil {
+				t.Fatal("Load() error = nil, want deploy validation error")
+			}
+		})
+	}
+}
+
+func Test_Load_when_DeployTargetMissingFields_thenErrorMentionsTarget(t *testing.T) {
+	// 前提
+	path := writeConfig(t, deployConfigHead+`    app:
+      compose_file: "docker-compose.yaml"
+`)
+
+	// 操作
+	_, err := Load(path)
+
+	// 断言
+	if err == nil || !strings.Contains(err.Error(), "app") || !strings.Contains(err.Error(), "dir") {
+		t.Errorf("error = %v, want the app target's missing dir", err)
+	}
+}
+
+func Test_Load_when_LarkEnvSet_thenEnvFillsMissingValues(t *testing.T) {
+	// 前提：webhook 和 secret 仅存在于环境变量中。
+	t.Setenv("LARK_WEBHOOK_URL", "https://open.feishu.cn/open-apis/bot/v2/hook/env")
+	t.Setenv("LARK_SECRET", "env-secret")
+	path := writeConfig(t, `
+code:
+  webhook_secret: "x"
+  domain: "example.com"
+notify:
+  enabled: true
+  lark:
+    webhook_url: ""
+    secret: ""
+`)
+
+	// 操作
+	cfg, err := Load(path)
+
+	// 断言
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Notify.Lark.WebhookURL != "https://open.feishu.cn/open-apis/bot/v2/hook/env" {
+		t.Errorf("WebhookURL = %q, want the env value", cfg.Notify.Lark.WebhookURL)
+	}
+	if cfg.Notify.Lark.Secret != "env-secret" {
+		t.Errorf("Secret = %q, want the env value", cfg.Notify.Lark.Secret)
+	}
+	if !cfg.Notify.LarkEnabled() {
+		t.Error("LarkEnabled() = false, want true")
+	}
+}
+
+func Test_Load_when_LarkEnvSetButYAMLConfigured_thenYAMLWins(t *testing.T) {
+	// 前提
+	t.Setenv("LARK_WEBHOOK_URL", "https://open.feishu.cn/open-apis/bot/v2/hook/env")
+	t.Setenv("LARK_SECRET", "env-secret")
+	path := writeConfig(t, `
+code:
+  webhook_secret: "x"
+  domain: "example.com"
+notify:
+  enabled: true
+  lark:
+    webhook_url: "https://open.feishu.cn/open-apis/bot/v2/hook/yaml"
+    secret: "yaml-secret"
+`)
+
+	// 操作
+	cfg, err := Load(path)
+
+	// 断言
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Notify.Lark.WebhookURL != "https://open.feishu.cn/open-apis/bot/v2/hook/yaml" {
+		t.Errorf("WebhookURL = %q, want the YAML value", cfg.Notify.Lark.WebhookURL)
+	}
+	if cfg.Notify.Lark.Secret != "yaml-secret" {
+		t.Errorf("Secret = %q, want the YAML value", cfg.Notify.Lark.Secret)
 	}
 }

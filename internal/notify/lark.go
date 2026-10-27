@@ -17,16 +17,16 @@ import (
 )
 
 const (
-	// larkMaxAttempts bounds delivery attempts per notification.
+	// larkMaxAttempts 限制每条通知的投递尝试次数。
 	larkMaxAttempts = 3
-	// maxRespBytes caps how much of Lark's response body is read.
+	// maxRespBytes 限制读取 Lark 响应正文的最大字节数。
 	maxRespBytes = 64 << 10
 )
 
-// retryBase is the first backoff between attempts; tests shorten it.
+// retryBase 是两次尝试之间的首次退避间隔；测试中会将其缩短。
 var retryBase = time.Second
 
-// larkPayload is the custom-bot request body.
+// larkPayload 是自定义机器人请求体。
 type larkPayload struct {
 	Timestamp string         `json:"timestamp"`
 	Sign      string         `json:"sign,omitempty"`
@@ -34,8 +34,8 @@ type larkPayload struct {
 	Card      map[string]any `json:"card"`
 }
 
-// larkResponse covers both response shapes the bot API has used: {"code":0}
-// and {"StatusCode":0}.
+// larkResponse 兼容机器人 API 使用过的两种响应格式：{"code":0}
+// 和 {"StatusCode":0}。
 type larkResponse struct {
 	Code          int    `json:"code"`
 	Msg           string `json:"msg"`
@@ -43,7 +43,7 @@ type larkResponse struct {
 	StatusMessage string `json:"StatusMessage"`
 }
 
-// send delivers msg to the configured Lark webhook.
+// send 将 msg 投递到配置的 Lark webhook。
 func (n *Notifier) send(ctx context.Context, msg Message) error {
 	if !n.Enabled() {
 		return nil
@@ -79,7 +79,7 @@ func (n *Notifier) send(ctx context.Context, msg Message) error {
 	return lastErr
 }
 
-// post performs one attempt and reports whether it is worth retrying.
+// post 执行一次尝试，并返回是否值得重试。
 func (n *Notifier) post(ctx context.Context, body []byte) (retry bool, err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, n.cfg.Lark.WebhookURL, bytes.NewReader(body))
 	if err != nil {
@@ -117,15 +117,15 @@ func (n *Notifier) post(ctx context.Context, body []byte) (retry bool, err error
 	return false, nil
 }
 
-// larkSign reproduces the Jenkins/Lark signature: the "<timestamp>\n<secret>"
-// string is the HMAC-SHA256 key and the signed payload is empty.
+// larkSign 复现 Jenkins/Lark 签名算法："<timestamp>\n<secret>" 字符串
+// 作为 HMAC-SHA256 密钥，被签名的载荷为空。
 func larkSign(timestamp int64, secret string) string {
 	mac := hmac.New(sha256.New, []byte(strconv.FormatInt(timestamp, 10)+"\n"+secret))
 	mac.Write(nil)
 	return base64.StdEncoding.EncodeToString(mac.Sum(nil))
 }
 
-// maskWebhook hides the bot token so it can appear in errors and logs safely.
+// maskWebhook 隐藏机器人 token，使其可以安全地出现在错误信息和日志中。
 func maskWebhook(raw string) string {
 	u, err := url.Parse(raw)
 	if err != nil || u.Host == "" {
@@ -138,7 +138,7 @@ func maskWebhook(raw string) string {
 	return u.Scheme + "://" + u.Host + path + "/****"
 }
 
-// sleepCtx waits for d or until the context is done.
+// sleepCtx 等待 d 时长，或直到 context 结束。
 func sleepCtx(ctx context.Context, d time.Duration) error {
 	t := time.NewTimer(d)
 	defer t.Stop()

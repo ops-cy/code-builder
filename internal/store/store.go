@@ -1,4 +1,4 @@
-// Package store keeps build records in memory and build logs on disk.
+// Package store 在内存中保存构建记录，在磁盘上保存构建日志。
 package store
 
 import (
@@ -9,14 +9,15 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
 
-// Status is the lifecycle state of a build.
+// Status 是构建的生命周期状态。
 type Status string
 
-// Build statuses.
+// 构建状态。
 const (
 	StatusQueued  Status = "queued"
 	StatusRunning Status = "running"
@@ -24,20 +25,25 @@ const (
 	StatusFailed  Status = "failed"
 )
 
-// Build is one build record.
+// Build 是一条构建记录。
 type Build struct {
 	ID            string
 	Repo          string
 	Branch        string
 	SHA           string
 	ShortSHA      string
-	Actor         string // push initiator from the webhook event
-	CommitSubject string // one-line commit summary from the webhook event
+	Actor         string // webhook 事件中的推送发起人
+	CommitSubject string // webhook 事件中的单行提交摘要
 	Status        Status
+	Tag           string // 本次构建解析出的镜像 tag
 	ImageTags     []string
-	Deployed      bool   // true when a post-build deploy succeeded
-	DeployError   string // non-empty when the build succeeded but deploy failed
-	NotifyError   string // non-empty when a notification could not be delivered
+	Deployed      bool   // 构建后部署成功时为 true
+	DeployStatus  string // 取值："", "skipped", "deployed", "failed"
+	DeployReason  string // 跳过部署的原因
+	DeployTarget  string // "<目录>/<compose 文件>"
+	DeployError   string // 部署失败时非空
+	DeployOutput  string // 部署失败后的 `docker compose ps` 输出
+	NotifyError   string // 通知投递失败时非空
 	Error         string
 	LogPath       string
 	CreatedAt     time.Time
@@ -45,8 +51,7 @@ type Build struct {
 	FinishedAt    time.Time
 }
 
-// Store is a concurrency-safe in-memory registry of builds; log bodies live
-// on disk under logsDir.
+// Store 是并发安全的构建内存注册表；日志正文存放在 logsDir 下的磁盘上。
 type Store struct {
 	mu     sync.RWMutex
 	logs   string
@@ -54,7 +59,7 @@ type Store struct {
 	builds map[string]*Build
 }
 
-// New creates the log directory if missing and returns an empty store.
+// New 在日志目录不存在时创建它，并返回空 store。
 func New(logsDir string) *Store {
 	_ = os.MkdirAll(logsDir, 0o755)
 	return &Store{
@@ -63,7 +68,7 @@ func New(logsDir string) *Store {
 	}
 }
 
-// Create registers the build, assigns ID and LogPath, and returns the stored copy.
+// Create 注册构建，分配 ID 和 LogPath，并返回存储的副本。
 func (s *Store) Create(b Build) Build {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -76,7 +81,7 @@ func (s *Store) Create(b Build) Build {
 	return stored
 }
 
-// Get returns a copy of the build with the given ID.
+// Get 返回指定 ID 的构建副本。
 func (s *Store) Get(id string) (Build, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -87,7 +92,7 @@ func (s *Store) Get(id string) (Build, bool) {
 	return *b, true
 }
 
-// List returns copies of all builds, newest CreatedAt first.
+// List 返回所有构建的副本，按 CreatedAt 从新到旧排序。
 func (s *Store) List() []Build {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -99,7 +104,7 @@ func (s *Store) List() []Build {
 	return out
 }
 
-// Update mutates the build with the given ID in place; unknown IDs are a no-op.
+// Update 就地修改指定 ID 的构建；未知 ID 不做任何操作。
 func (s *Store) Update(id string, fn func(*Build)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -108,7 +113,7 @@ func (s *Store) Update(id string, fn func(*Build)) {
 	}
 }
 
-// OpenLog opens the build's log file for appending. Caller closes it.
+// OpenLog 以追加方式打开构建日志文件。由调用方负责关闭。
 func (s *Store) OpenLog(id string) (*os.File, error) {
 	s.mu.RLock()
 	b, ok := s.builds[id]
@@ -127,7 +132,7 @@ func (s *Store) OpenLog(id string) (*os.File, error) {
 	return f, nil
 }
 
-// ReadLog returns the full log content of a build.
+// ReadLog 返回构建的完整日志内容。
 func (s *Store) ReadLog(id string) (string, error) {
 	s.mu.RLock()
 	b, ok := s.builds[id]
@@ -146,6 +151,23 @@ func (s *Store) ReadLog(id string) (string, error) {
 	return string(content), nil
 }
 
+// ReadLogTail 最多返回构建日志的最后 n 行，用于在通知中嵌入简短的
+// 失败片段。日志不存在时返回 ""。
+func (s *Store) ReadLogTail(id string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	content, err := s.ReadLog(id)
+	if err != nil {
+		return ""
+	}
+	lines := strings.Split(strings.TrimRight(content, "\r\n"), "\n")
+	if len(lines) <= n {
+		return strings.Join(lines, "\n")
+	}
+	return strings.Join(lines[len(lines)-n:], "\n")
+}
+
 func randomHex(n int) string {
 	buf := make([]byte, n)
 	if _, err := rand.Read(buf); err != nil {
@@ -154,5 +176,5 @@ func randomHex(n int) string {
 	return hex.EncodeToString(buf)
 }
 
-// ErrNotExist re-exported convenience for callers checking log absence.
+// ErrNotExist 是便于调用方检查日志缺失而重新导出的错误。
 var ErrNotExist = fs.ErrNotExist

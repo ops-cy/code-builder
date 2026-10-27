@@ -1,4 +1,4 @@
-// Command server runs the GitLab webhook image builder service.
+// Command server 运行 GitLab webhook 镜像构建服务。
 package main
 
 import (
@@ -42,8 +42,8 @@ func main() {
 	q := queue.New(cfg.Server.Concurrency, cfg.Server.QueueSize)
 	go q.Start(ctx)
 
-	// Optional SSH deploy key for every clone (not part of the YAML file):
-	// fail fast at boot if configured but inaccessible.
+	// 每次 clone 可选使用的 SSH 部署密钥（不在 YAML 配置文件中）：
+	// 若已配置但无法访问，则在启动时快速失败。
 	deployKey := os.Getenv("GITLAB_DEPLOY_KEY_PATH")
 	if deployKey != "" {
 		if _, err := os.Stat(deployKey); err != nil {
@@ -64,6 +64,7 @@ func main() {
 		Workspace:     cfg.Server.Workspace,
 		Registry:      cfg.Registry,
 		Build:         cfg.Build,
+		Timeouts:      cfg.Timeouts,
 		Deploy:        cfg.Deploy,
 		Notify:        notify.New(cfg.Notify, logger),
 	}

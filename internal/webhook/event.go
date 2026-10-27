@@ -1,9 +1,9 @@
-// Package webhook handles GitLab push events and enqueues build jobs.
+// Package webhook 处理 GitLab push 事件并入队构建任务。
 package webhook
 
 import "strings"
 
-// PushEvent is the parsed subset of GitLab's push event JSON payload.
+// PushEvent 是 GitLab push 事件 JSON 负载中解析出的子集。
 type PushEvent struct {
 	ObjectKind  string `json:"object_kind"`
 	EventName   string `json:"event_name"`
@@ -11,7 +11,7 @@ type PushEvent struct {
 	Before      string `json:"before"`
 	After       string `json:"after"`
 	CheckoutSHA string `json:"checkout_sha"`
-	// UserName is the person who pushed (shown as the notification initiator).
+	// UserName 是发起推送的人（作为通知发起者展示）。
 	UserName string `json:"user_name"`
 	Project  struct {
 		Name              string `json:"name"`
@@ -30,12 +30,12 @@ type PushEvent struct {
 	} `json:"commits"`
 }
 
-// isPush reports whether the event is a branch push.
+// isPush 判断该事件是否为分支 push。
 func (e PushEvent) isPush() bool {
 	return e.ObjectKind == "push" || e.EventName == "push"
 }
 
-// isDelete reports whether the push deletes a ref (no new commit).
+// isDelete 判断该 push 是否删除 ref（没有新的 commit）。
 func (e PushEvent) isDelete() bool {
 	if e.CheckoutSHA == "" {
 		return true
@@ -48,7 +48,7 @@ func (e PushEvent) isDelete() bool {
 	return true
 }
 
-// branch strips the refs/heads/ prefix; ok is false for non-branch refs.
+// branch 去掉 refs/heads/ 前缀；对于非分支 ref，ok 为 false。
 func (e PushEvent) branch() (string, bool) {
 	const prefix = "refs/heads/"
 	if len(e.Ref) <= len(prefix) || e.Ref[:len(prefix)] != prefix {
@@ -57,7 +57,7 @@ func (e PushEvent) branch() (string, bool) {
 	return e.Ref[len(prefix):], true
 }
 
-// sha prefers checkout_sha and falls back to after.
+// sha 优先使用 checkout_sha，缺失时回退到 after。
 func (e PushEvent) sha() string {
 	if e.CheckoutSHA != "" {
 		return e.CheckoutSHA
@@ -65,8 +65,8 @@ func (e PushEvent) sha() string {
 	return e.After
 }
 
-// actor returns the push initiator, falling back to the last commit author
-// when GitLab omits user_name.
+// actor 返回推送发起者；当 GitLab 未提供 user_name 时，回退到最后一次
+// commit 的作者。
 func (e PushEvent) actor() string {
 	if s := strings.TrimSpace(e.UserName); s != "" {
 		return s
@@ -79,9 +79,8 @@ func (e PushEvent) actor() string {
 	return ""
 }
 
-// commitSubject returns the one-line summary of the pushed commit: the commit
-// whose id equals sha, otherwise the last commit. Title wins over the first
-// line of message.
+// commitSubject 返回被推送 commit 的单行摘要：优先取 id 等于 sha 的 commit，
+// 否则取最后一个 commit。Title 优先于 message 的第一行。
 func (e PushEvent) commitSubject(sha string) string {
 	if len(e.Commits) == 0 {
 		return ""
@@ -99,7 +98,7 @@ func (e PushEvent) commitSubject(sha string) string {
 	return firstLine(c.Message)
 }
 
-// firstLine trims surrounding space and keeps only the first line.
+// firstLine 去掉首尾空白，只保留第一行。
 func firstLine(s string) string {
 	if i := strings.IndexByte(s, '\n'); i >= 0 {
 		s = s[:i]

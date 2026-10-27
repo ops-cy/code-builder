@@ -5,8 +5,8 @@ import (
 	"testing"
 )
 
-// makePushEvent builds a push event for deriveRepository tests: the event
-// payload is untrusted input, so tests cover both accepted and rejected shapes.
+// makePushEvent 为 deriveRepository 的测试构造 push 事件：事件负载属于
+// 不可信输入，因此测试同时覆盖被接受和被拒绝的形态。
 func makePushEvent(name, sshURL, httpURL string) PushEvent {
 	var ev PushEvent
 	ev.ObjectKind = "push"
@@ -38,26 +38,6 @@ func Test_normalizeDockerName(t *testing.T) {
 		t.Run(tt.in, func(t *testing.T) {
 			if got := normalizeDockerName(tt.in); got != tt.want {
 				t.Errorf("normalizeDockerName(%q) = %q, want %q", tt.in, got, tt.want)
-			}
-		})
-	}
-}
-
-func Test_repoNameFromURL(t *testing.T) {
-	tests := []struct {
-		in   string
-		want string
-	}{
-		{in: "ssh://git@example.com:20022/group/backend-api.git", want: "backend-api"},
-		{in: "https://example.com/group/app.git", want: "app"},
-		{in: "https://example.com/group/app", want: "app"},
-		{in: "git@example.com:group/scm.git", want: "scm"},
-		{in: "http://", want: ""},
-	}
-	for _, tt := range tests {
-		t.Run(tt.in, func(t *testing.T) {
-			if got := repoNameFromURL(tt.in); got != tt.want {
-				t.Errorf("repoNameFromURL(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
 	}
@@ -124,26 +104,36 @@ func Test_deriveRepository(t *testing.T) {
 		if !strings.HasPrefix(r2.Build.Image, "app-") {
 			t.Errorf("second image = %q, want app- prefix", r2.Build.Image)
 		}
-		// idempotent: same event again must return the same image
+		// 幂等：同一事件再次投递必须返回同一个镜像名
 		r2again, _ := deriveRepository("example.com", shared, ev2)
 		if r2again.Build.Image != r2.Build.Image {
 			t.Errorf("image not stable: %q vs %q", r2.Build.Image, r2again.Build.Image)
 		}
 	})
 
-	t.Run("unconvertible name falls back to hash id", func(t *testing.T) {
+	t.Run("URL last segment wins over the event project name", func(t *testing.T) {
 		ev := makePushEvent("项目",
-			"ssh://git@example.com:20022/group/x.git",
-			"https://example.com/group/x.git")
+			"ssh://git@example.com:20022/group/repo-name.git",
+			"https://example.com/group/repo-name.git")
 		repo, reason := deriveRepository("example.com", newImageRegistry(), ev)
 		if reason != "" {
 			t.Fatalf("reason = %q, want empty", reason)
 		}
-		if !strings.HasPrefix(repo.Name, "repo-") {
-			t.Errorf("Name = %q, want repo-<hash> fallback", repo.Name)
+		if repo.Name != "repo-name" {
+			t.Errorf("Name = %q, want repo-name (URL last segment)", repo.Name)
 		}
 		if repo.Build.Image != repo.Name {
 			t.Errorf("Image = %q, want equal to Name %q", repo.Build.Image, repo.Name)
+		}
+	})
+
+	t.Run("unusable URL name reported as invalid", func(t *testing.T) {
+		ev := makePushEvent("app",
+			"ssh://git@example.com:20022/group/项目.git",
+			"https://example.com/group/项目.git")
+		_, reason := deriveRepository("example.com", newImageRegistry(), ev)
+		if reason != reasonInvalidName {
+			t.Errorf("reason = %q, want %q", reason, reasonInvalidName)
 		}
 	})
 
@@ -189,10 +179,10 @@ func Test_validCommitSHA(t *testing.T) {
 }
 
 func Test_dedup_getPutRelease(t *testing.T) {
-	// Given
+	// 准备
 	d := newDedup()
 
-	// When/Then: put + get hit
+	// 执行/断言：put + get 命中
 	_, dup := d.get("k@sha")
 	if dup {
 		t.Fatal("first get must not be duplicate")
@@ -204,13 +194,13 @@ func Test_dedup_getPutRelease(t *testing.T) {
 		t.Error("second get must be duplicate while build is active")
 	}
 
-	// release with a mismatched id must not clear the entry
+	// 用不匹配的 id 调用 release 不得清除该条目
 	d.release("k@sha", "other-build")
 	if _, dup := d.get("k@sha"); !dup {
 		t.Error("release with wrong id must not clear the dedup entry")
 	}
 
-	// release with the matching id clears it
+	// 用匹配的 id 调用 release 会清除该条目
 	d.release("k@sha", "build-1")
 	if _, dup := d.get("k@sha"); dup {
 		t.Error("release with matching id must clear the dedup entry")
@@ -218,15 +208,15 @@ func Test_dedup_getPutRelease(t *testing.T) {
 }
 
 func Test_imageRegistry_stableAcrossCalls(t *testing.T) {
-	// Given
+	// 准备
 	reg := newImageRegistry()
 
-	// When
+	// 执行
 	first := reg.resolve("app", "example.com/g/app")
 	second := reg.resolve("app", "example.com/g/app")
 	conflict := reg.resolve("app", "example.com/other/app")
 
-	// Then
+	// 断言
 	if first != "app" {
 		t.Errorf("first = %q, want app", first)
 	}

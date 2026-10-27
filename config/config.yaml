@@ -1,9 +1,9 @@
 # GitLab Webhook 自动镜像构建服务 — 配置示例
 #
-# 配置分为 server / code / build / registry / deploy 五段：不维护仓库列表。
-# 在授权 GitLab 域名的任意项目添加 Webhook 即可接入；仓库地址、分支、Commit
-# 全部取自事件数据，镜像名取自仓库名，Dockerfile 用仓库根目录的（缺失时套内置模板）。
-# Tag 默认取 Commit SHA 前 8 位；配置 build.tag / build.branch_tags 可改为固定 tag。
+# 配置分为 server / code 两段与可选的 timeouts / build / registry / deploy / notify 段：
+# 不维护仓库列表。在授权 GitLab 域名的任意项目添加 Webhook 即可接入；仓库地址、分支、
+# Commit 全部取自事件数据，镜像名 = 仓库 URL 末尾（最后一个 / 与 .git 之间，转小写），
+# Dockerfile 用仓库根目录的（缺失时套内置模板）。Tag 默认 latest，可用 build 段覆盖。
 #
 # ${VAR} 占位符在启动时从环境变量展开；引用未设置的环境变量将启动失败。
 
@@ -32,9 +32,15 @@ code:
     - "main"
     - "master"
 
-# 镜像 Tag 策略（可选）。默认（整段省略）沿用 Commit SHA 前 8 位。
-# 配置任一字段后即替代 commit tag：
-#   解析顺序：branch_tags[分支] → build.tag → SHA 前 8 位（兜底）
+# 各步骤超时（可选）；省略时使用下面的默认值。值为 Go duration（如 15m / 90s）。
+timeouts:
+  clone: "15m"
+  build: "25m"
+  job: "30m"
+  deploy: "5m"
+
+# 镜像 Tag 策略（可选）。默认（整段省略）= latest。
+# 解析顺序：branch_tags[分支] → build.tag → latest
 build:
   # 所有分支的默认 tag（例: latest / stable / v1.2.3）
   tag: ""
@@ -56,34 +62,24 @@ registry:
   username: ""
   password: ""
 
-# 构建后自动发布（可选）。开启后，当某次构建产出的 tag 等于 deploy.tag 时，
-# 对目标服务执行 `docker compose -f <服务目录>/<compose 文件> -p <项目> up -d <服务>`，
-# 直接使用刚构建出的本地镜像（不 pull）。部署失败不影响构建结果（构建仍 success，
-# 错误记录在 build 的 deploy_err 字段）。
-#
-# 目录约定：/data/services/<服务名>/docker-compose.yaml，目录名 = 镜像名 = compose 服务名。
-# 该目录必须以【相同路径】挂载进本容器（见 docker-compose.yml 的 /data/services）。
+# 构建后自动部署（可选）。省略或 enabled:false = 不部署。
+# 构建成功后，用仓库 URL 末尾值（repo_name）匹配 targets 的 key；命中则执行：
+#   docker compose -f <dir>/<compose_file> up -d [service]
+# 工作目录 = <dir>；不 pull，compose 直接引用刚构建出的本地镜像。
+# 部署失败不影响构建结果（构建仍 success，错误记入 DeployError）。
 deploy:
-  # 是否开启自动发布
   enabled: false
-  # 服务目录根（容器内路径，需与宿主机同路径挂载）
-  services_dir: "/data/services"
-  # 每个服务目录内的 compose 文件名；缺失时自动尝试 compose.yaml 等标准名
-  compose_file: "docker-compose.yaml"
-  # compose 项目名；留空 = 服务目录名（compose 自身默认）
-  project_name: ""
-  # 仅当构建产出的 tag 等于它时才发布（通常为 latest）
-  tag: "latest"
-  # up -d 后是否等待容器健康（追加 --wait --wait-timeout）
-  wait: false
-  wait_timeout: "120s"
-  # 可选：按服务名覆盖目录/服务键/项目名/ compose 文件名（默认同上约定）
-  # services:
-  #   ex-backend:
-  #     dir: "ex-backend"
-  #     service: "ex-backend"
-  #     project_name: "ex-backend"
+  # key = 仓库 URL 末尾（最后一个 / 与 .git 之间，转小写；大小写不敏感）
+  # targets:
+  #   atlas-market:
+  #     # 服务目录（容器内绝对路径；宿主机需同路径挂载，见 docker-compose.yml）
+  #     dir: "/data/services/atlas-market"
+  #     # 目录内的启动文件（仅文件名，不含路径）
   #     compose_file: "docker-compose.yaml"
+  #     # 可选：只启动某个 compose 服务；留空 = 启动整个文件
+  #     service: ""
+  #     # 兼容字段：保留解析但不参与判断（部署不看 tag）
+  #     tag: ""
 
 # 流水线通知（可选）。省略或 enabled:false = 不发送任何通知。
 # 卡片格式与 Jenkins 共享库一致：标题 / 项目名称 / 构建发起 / 当前版本 / 持续时间 /
@@ -93,13 +89,14 @@ notify:
   enabled: false
   # 各事件开关（省略 = true）
   on_started: true      # 🚀 流水线开始
-  on_success: true      # ✅ 流水线成功（含“部署失败”提示）
+  on_success: true      # ✅ 流水线成功
   on_failure: true      # ❌ 流水线失败
   lark:
     # 飞书自定义机器人 Webhook，直接写在这里（含 token，属敏感信息，不会写入日志）。
+    # 留空时使用 LARK_WEBHOOK_URL 环境变量（仍需 notify.enabled: true）。
     # 例: "https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
     webhook_url: ""
-    # 可选：机器人开启“签名校验”时填写密钥
+    # 可选：机器人开启“签名校验”时填写密钥；留空时使用 LARK_SECRET 环境变量
     secret: ""
     # 单次投递超时
     timeout: "10s"

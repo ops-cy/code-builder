@@ -18,6 +18,9 @@ services:
       # 可选：镜像仓库密码，供 config.yaml 的 registry.password 以 ${REGISTRY_PASSWORD} 引用
       # 仅在配置了 registry.url（启用推送）时需要
       REGISTRY_PASSWORD: ${REGISTRY_PASSWORD:-}
+      # 可选：飞书机器人地址与签名密钥（config.yaml 中留空时使用）
+      LARK_WEBHOOK_URL: ${LARK_WEBHOOK_URL:-}
+      LARK_SECRET: ${LARK_SECRET:-}
       # 可选：debug | info | warn | error
       LOG_LEVEL: ${LOG_LEVEL:-info}
     volumes:
@@ -28,8 +31,8 @@ services:
       # 构建工作区与构建日志（持久化）
       - ./data:/app/workspace
       - ./logs:/app/logs
-      # 服务目录（deploy.services_dir）：必须与宿主机同路径挂载，
-      # 否则 compose 的相对路径（.env / env_file / bind mount）会解析错
+      # 服务目录（deploy.targets[].dir）：必须与宿主机同路径挂载，compose
+      # 才能在容器内按宿主机路径解析 .env / env_file / bind mount
       - /data/services:/data/services:ro
       # Docker Socket：服务通过宿主机 Docker 守护进程执行 docker build；
       # 默认仅本地，配置 registry.url 后可 docker login + push

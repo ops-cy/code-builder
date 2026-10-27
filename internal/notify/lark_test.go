@@ -29,7 +29,7 @@ func newTestNotifier(t *testing.T, url string, mutate func(*config.NotifyConfig)
 }
 
 func Test_send_when_OK_thenInteractiveCard(t *testing.T) {
-	// Given
+	// 准备
 	var got larkPayload
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if ct := r.Header.Get("Content-Type"); ct != "application/json" {
@@ -44,10 +44,10 @@ func Test_send_when_OK_thenInteractiveCard(t *testing.T) {
 	defer srv.Close()
 	n := newTestNotifier(t, srv.URL, nil)
 
-	// When
+	// 执行
 	err := n.send(context.Background(), sampleMessage(EventSuccess))
 
-	// Then
+	// 断言
 	if err != nil {
 		t.Fatalf("send() error = %v", err)
 	}
@@ -67,7 +67,7 @@ func Test_send_when_OK_thenInteractiveCard(t *testing.T) {
 }
 
 func Test_send_when_Secret_thenSignMatchesJenkinsFormula(t *testing.T) {
-	// Given
+	// 准备
 	var got larkPayload
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
@@ -77,12 +77,12 @@ func Test_send_when_Secret_thenSignMatchesJenkinsFormula(t *testing.T) {
 	defer srv.Close()
 	n := newTestNotifier(t, srv.URL, func(c *config.NotifyConfig) { c.Lark.Secret = "s3cret" })
 
-	// When
+	// 执行
 	if err := n.send(context.Background(), sampleMessage(EventSuccess)); err != nil {
 		t.Fatalf("send() error = %v", err)
 	}
 
-	// Then
+	// 断言
 	ts, err := strconv.ParseInt(got.Timestamp, 10, 64)
 	if err != nil {
 		t.Fatalf("timestamp %q is not unix seconds: %v", got.Timestamp, err)
@@ -93,7 +93,7 @@ func Test_send_when_Secret_thenSignMatchesJenkinsFormula(t *testing.T) {
 }
 
 func Test_send_when_5xx_thenRetriesAndSucceeds(t *testing.T) {
-	// Given
+	// 准备
 	old := retryBase
 	retryBase = time.Millisecond
 	t.Cleanup(func() { retryBase = old })
@@ -110,10 +110,10 @@ func Test_send_when_5xx_thenRetriesAndSucceeds(t *testing.T) {
 	defer srv.Close()
 	n := newTestNotifier(t, srv.URL, nil)
 
-	// When
+	// 执行
 	err := n.send(context.Background(), sampleMessage(EventSuccess))
 
-	// Then
+	// 断言
 	if err != nil {
 		t.Fatalf("send() error = %v, want success after retry", err)
 	}
@@ -123,7 +123,7 @@ func Test_send_when_5xx_thenRetriesAndSucceeds(t *testing.T) {
 }
 
 func Test_send_when_400_thenNoRetry(t *testing.T) {
-	// Given
+	// 准备
 	old := retryBase
 	retryBase = time.Millisecond
 	t.Cleanup(func() { retryBase = old })
@@ -137,10 +137,10 @@ func Test_send_when_400_thenNoRetry(t *testing.T) {
 	defer srv.Close()
 	n := newTestNotifier(t, srv.URL, nil)
 
-	// When
+	// 执行
 	err := n.send(context.Background(), sampleMessage(EventFailure))
 
-	// Then
+	// 断言
 	if err == nil {
 		t.Fatal("send() error = nil, want failure")
 	}
@@ -150,30 +150,30 @@ func Test_send_when_400_thenNoRetry(t *testing.T) {
 }
 
 func Test_send_when_LarkRejects_thenError(t *testing.T) {
-	// Given: HTTP 200 but a non-zero Lark code.
+	// 准备：HTTP 200，但 Lark 返回非零 code。
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, `{"code":19021,"msg":"sign match fail"}`)
 	}))
 	defer srv.Close()
 	n := newTestNotifier(t, srv.URL, nil)
 
-	// When
+	// 执行
 	err := n.send(context.Background(), sampleMessage(EventSuccess))
 
-	// Then
+	// 断言
 	if err == nil || !strings.Contains(err.Error(), "rejected") {
 		t.Fatalf("error = %v, want lark rejection", err)
 	}
 }
 
 func Test_maskWebhook_when_URL_thenTokenHidden(t *testing.T) {
-	// Given
+	// 准备
 	raw := "https://open.feishu.cn/open-apis/bot/v2/hook/abc123?sign=1"
 
-	// When
+	// 执行
 	got := maskWebhook(raw)
 
-	// Then
+	// 断言
 	if strings.Contains(got, "abc123") {
 		t.Errorf("masked URL leaks token: %s", got)
 	}
@@ -183,7 +183,7 @@ func Test_maskWebhook_when_URL_thenTokenHidden(t *testing.T) {
 }
 
 func Test_Notifier_Wants(t *testing.T) {
-	// Given
+	// 准备
 	on, off := true, false
 	tests := []struct {
 		name string
@@ -209,7 +209,7 @@ func Test_Notifier_Wants(t *testing.T) {
 }
 
 func Test_Async_when_Disabled_thenNoRequest(t *testing.T) {
-	// Given
+	// 准备
 	var calls int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&calls, 1)
@@ -218,18 +218,18 @@ func Test_Async_when_Disabled_thenNoRequest(t *testing.T) {
 	defer srv.Close()
 	n := New(config.NotifyConfig{}, nil)
 
-	// When
+	// 执行
 	n.Async(sampleMessage(EventSuccess), nil)
 	time.Sleep(50 * time.Millisecond)
 
-	// Then
+	// 断言
 	if got := atomic.LoadInt32(&calls); got != 0 {
 		t.Errorf("calls = %d, want 0 while disabled", got)
 	}
 }
 
 func Test_Async_when_DeliveryFails_thenCallbackRuns(t *testing.T) {
-	// Given
+	// 准备
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 	}))
@@ -237,10 +237,10 @@ func Test_Async_when_DeliveryFails_thenCallbackRuns(t *testing.T) {
 	n := newTestNotifier(t, srv.URL, nil)
 	done := make(chan error, 1)
 
-	// When
+	// 执行
 	n.Async(sampleMessage(EventSuccess), func(err error) { done <- err })
 
-	// Then
+	// 断言
 	select {
 	case err := <-done:
 		if err == nil {

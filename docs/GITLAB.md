@@ -39,6 +39,7 @@
    | 202 `queued` | 成功入队，记下响应中的 `build_id`（含 `image` 与 `tag`） |
    | 202 `ignored` | 测试事件不是真实分支 Push（正常，说明链路已通） |
    | 202 `host_not_allowed` | 事件仓库地址域名不等于 `code.domain`，检查 `config.yaml` 的 `code.domain` |
+   | 202 `invalid_repo_name` | 仓库 URL 末尾无法得到合法镜像名（如全中文） |
    | 202 `branch_filtered` | 当前分支不在 `code.branches` 白名单 |
    | 202 `duplicate` | 同仓库同 Commit 已在排队/构建中（正常，未重复入队） |
    | 401 | Secret token 不一致 |
@@ -68,11 +69,15 @@ curl http://<构建机IP>:8080/api/builds/<build_id>/log
 ```
 
 构建成功后在构建机执行 `docker images` 可看到
-`<仓库名>:<标签>` 镜像（标签默认 = commit SHA 前 8 位，配置 `build.tag` /
-`build.branch_tags` 后为固定标签，如 `latest`）。默认仅本地；若 `config.yaml` 配置了
-`registry.url`，同一镜像还会以 `<url>[/<project>]/<仓库名>:<标签>` 推送到镜像仓库（日志中
-`==> registry push enabled remote=...` 一行可见）。若配置了 `deploy.enabled` 且产出标签等于
-`deploy.tag`，服务还会对该服务目录执行 `docker compose up -d`（日志中 `==> deploy command: ...` 一行可见）。
+`<repo_name>:<tag>` 镜像（`repo_name` = 仓库 URL 最后一个 `/` 与 `.git` 之间的值，
+如 `https://gitlab.com/team/Atlas-Market.git` → `atlas-market`；标签默认 `latest`，
+配置 `build.tag` / `build.branch_tags` 后可改为固定标签）。默认仅本地；若 `config.yaml`
+配置了 `registry.url`，同一镜像还会以 `<url>[/<project>]/<repo_name>:<tag>` 推送到镜像仓库
+（日志中 `==> registry push enabled remote=...` 一行可见）。
+
+若配置了 `deploy`，构建成功后还会按 `repo_name` 匹配 `deploy.targets` 并执行
+`docker compose -f <dir>/<compose_file> up -d [service]`（不 pull，直接使用本地镜像）。
+部署失败不会改变构建结果，但飞书成功卡片的标题会变为 `⚠️ 构建成功，部署失败`。
 
 ## 5. 准入与触发策略速查
 
@@ -89,10 +94,19 @@ code:
     - "main"
     - "master"
 
-# 可选：配置标签策略；省略则标签取 Commit SHA 前 8 位
+# 可选：配置标签策略；省略则标签为 latest
 # build:
 #   tag: "latest"                 # 全局默认标签
 #   branch_tags: {main: "stable"} # 按分支覆盖（精确匹配）
+
+# 可选：构建成功后自动部署；key = 仓库 URL 末尾（repo_name）
+# deploy:
+#   enabled: true
+#   targets:
+#     atlas-market:
+#       dir: "/data/services/atlas-market"
+#       compose_file: "docker-compose.yaml"
+#       service: ""
 
 # 可选：配置 url 后构建成功自动推送，省略则仅本地构建
 # registry:
@@ -101,11 +115,6 @@ code:
 #   username: "ci"
 #   password: "${REGISTRY_PASSWORD}"
 
-# 可选：产出标签等于 tag 时自动发布（docker compose up -d）
-# deploy:
-#   enabled: true
-#   services_dir: "/data/services"
-#   tag: "latest"
 ```
 
 - `feature/x` 的 Push → 不在白名单 → **不构建**（`branch_filtered`）
@@ -116,5 +125,5 @@ code:
 ## 6. 常见问题
 
 - **Push 了但没有任何记录**：先确认 Webhook 最近交付记录（Webhooks 页面底部 **Recent Deliveries**）是否有 202；若无交付，检查 URL 可达性与网络策略
-- **同一仓库连推多次**：任务按仓库（归一化 URL）串行排队；同 Commit 去重返回 `duplicate`，不同 Commit 逐个按序构建
+- **同一仓库连推多次**：任务按 `repo_name`（URL 末尾）串行排队；同 Commit 去重返回 `duplicate`，不同 Commit 逐个按序构建
 - **修改了 config.yaml 或环境变量**：需 `docker compose up -d`（重建容器）生效

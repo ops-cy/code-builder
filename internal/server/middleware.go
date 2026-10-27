@@ -11,7 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// RequestID propagates an X-Request-ID header through the request context.
+// RequestID 通过请求上下文透传 X-Request-ID 请求头。
 func RequestID() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id := c.GetHeader("X-Request-ID")
@@ -24,7 +24,7 @@ func RequestID() gin.HandlerFunc {
 	}
 }
 
-// Recovery converts panics into 500 responses and logs the stack.
+// Recovery 将 panic 转换为 500 响应并记录堆栈。
 func Recovery(logger *slog.Logger) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		defer func() {
@@ -43,7 +43,7 @@ func Recovery(logger *slog.Logger) gin.HandlerFunc {
 	}
 }
 
-// RequestLogger emits one structured line per request after completion.
+// RequestLogger 在每个请求完成后输出一行结构化日志。
 func RequestLogger(logger *slog.Logger) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		start := time.Now()

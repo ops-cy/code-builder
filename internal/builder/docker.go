@@ -10,37 +10,40 @@ import (
 	"time"
 )
 
-// execCommand is the exec seam; tests override it to stub the docker CLI.
+// execCommand 是 exec 的接缝；测试会覆盖它以桩掉 docker CLI。
 var execCommand = exec.CommandContext
 
-// dockerBuildTimeout bounds the docker availability probe plus one build so a
-// wedged daemon or huge context cannot occupy a worker slot forever.
+// dockerBuildTimeout 限制 docker 可用性探测加上一次构建的总时长，避免卡死的守护进程
+// 或巨大的构建上下文永久占用一个工作槽位。
 const dockerBuildTimeout = 25 * time.Minute
 
 type dockerBuildRequest struct {
 	ContextDir string
 	Dockerfile string
-	Tags       []string // every -t argument (local, plus remote when pushing)
-	PushRefs   []string // fully-qualified refs to push after a successful build
+	Tags       []string // 每个 -t 参数（本地 tag，推送时还包含远程 ref）
+	PushRefs   []string // 构建成功后要推送的完整限定 ref
 	Login      *dockerLogin
 	Log        io.Writer
+	Timeout    time.Duration // 为零时使用 dockerBuildTimeout
 }
 
-// dockerLogin is an optional registry credential; when non-nil a
-// `docker login` runs before the build so the subsequent push is authorised.
-// The password is fed on stdin and never written to the log.
+// dockerLogin 是可选的 registry 凭据；非 nil 时会在构建前执行 `docker login`，
+// 以便随后的推送获得授权。密码通过 stdin 传入，绝不写入日志。
 type dockerLogin struct {
 	Registry string
 	Username string
 	Password string
 }
 
-// dockerBuild runs `docker build` against the daemon reached via DOCKER_HOST
-// (the mounted Docker socket in the service container), then pushes each
-// PushRefs entry when the registry is enabled. The exact commands and their
-// full output are streamed to req.Log.
+// dockerBuild 通过 DOCKER_HOST 访问守护进程（服务容器中挂载的 Docker socket），
+// 执行 `docker build`，随后在 registry 启用时逐个推送 PushRefs 中的条目。
+// 确切的命令及其完整输出都会流式写入 req.Log。
 func dockerBuild(ctx context.Context, req dockerBuildRequest) error {
-	ctx, cancel := context.WithTimeout(ctx, dockerBuildTimeout)
+	timeout := req.Timeout
+	if timeout <= 0 {
+		timeout = dockerBuildTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	if err := dockerAvailable(ctx); err != nil {
@@ -77,7 +80,7 @@ func dockerBuild(ctx context.Context, req dockerBuildRequest) error {
 	return nil
 }
 
-// dockerLoginRun authenticates to the registry with the password on stdin.
+// dockerLoginRun 使用来自 stdin 的密码完成 registry 认证。
 func dockerLoginRun(ctx context.Context, l *dockerLogin, logw io.Writer) error {
 	fmt.Fprintf(logw, "==> docker login %s (user=%s)\n", l.Registry, l.Username)
 	cmd := execCommand(ctx, "docker", "login", l.Registry, "-u", l.Username, "--password-stdin")
@@ -91,7 +94,7 @@ func dockerLoginRun(ctx context.Context, l *dockerLogin, logw io.Writer) error {
 	return nil
 }
 
-// dockerPush pushes one fully-qualified image reference.
+// dockerPush 推送一个完整限定的镜像引用。
 func dockerPush(ctx context.Context, ref string, logw io.Writer) error {
 	fmt.Fprintf(logw, "==> docker push %s\n", ref)
 	cmd := execCommand(ctx, "docker", "push", ref)
@@ -104,7 +107,7 @@ func dockerPush(ctx context.Context, ref string, logw io.Writer) error {
 	return nil
 }
 
-// dockerAvailable probes the daemon once with a clear error on failure.
+// dockerAvailable 对守护进程做一次探测，失败时给出清晰的错误。
 func dockerAvailable(ctx context.Context) error {
 	var out bytes.Buffer
 	cmd := execCommand(ctx, "docker", "version", "--format", "{{.Server.Version}}")

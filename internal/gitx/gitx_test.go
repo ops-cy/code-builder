@@ -11,24 +11,24 @@ import (
 )
 
 func Test_SSHCommand_when_NoKey_thenReturnEmpty(t *testing.T) {
-	// Given
-	// When
+	// 准备
+	// 执行
 	got := SSHCommand("", "/data/known_hosts")
 
-	// Then
+	// 断言
 	if got != "" {
 		t.Errorf("SSHCommand() = %q, want empty without deploy key", got)
 	}
 }
 
 func Test_SSHCommand_when_KeyAndKnownHosts_thenReturnHardenendOptions(t *testing.T) {
-	// Given
+	// 准备
 	key := "/run/secrets/deploy_key"
 
-	// When
+	// 执行
 	got := SSHCommand(key, "")
 
-	// Then
+	// 断言
 	for _, want := range []string{
 		"-i",
 		key,
@@ -40,21 +40,21 @@ func Test_SSHCommand_when_KeyAndKnownHosts_thenReturnHardenendOptions(t *testing
 			t.Errorf("SSHCommand() = %q, missing %q", got, want)
 		}
 	}
-	// host key checking must never be fully disabled
+	// 主机密钥检查绝不能完全关闭
 	if strings.Contains(got, "StrictHostKeyChecking=no") {
 		t.Errorf("SSHCommand() = %q, must not disable host key checking", got)
 	}
 }
 
 func Test_SSHCommand_when_KnownHostsPath_ThenPinUserKnownHostsFile(t *testing.T) {
-	// Given
+	// 准备
 	known := filepath.Join(t.TempDir(), "known_hosts")
 
-	// When
+	// 执行
 	got := SSHCommand("/run/secrets/deploy_key", known)
 
-	// Then
-	// the path is shell-quoted (backslashes escaped on Windows)
+	// 断言
+	// 该路径会做 shell 引用（在 Windows 上反斜杠会被转义）
 	if !strings.Contains(got, "UserKnownHostsFile="+strconv.Quote(known)) {
 		t.Errorf("SSHCommand() = %q, missing UserKnownHostsFile=%q", got, strconv.Quote(known))
 	}
@@ -81,17 +81,17 @@ func Test_MaskURL(t *testing.T) {
 }
 
 func Test_CloneAtSHA_when_DestExists_thenReturnError(t *testing.T) {
-	// Given
+	// 准备
 	dest := t.TempDir()
 
-	// When
+	// 执行
 	err := CloneAtSHA(context.Background(), CloneReq{
 		URL:  "https://example.com/g/app.git",
 		SHA:  "abc",
 		Dest: dest,
 	}, io.Discard)
 
-	// Then
+	// 断言
 	if err == nil {
 		t.Fatal("CloneAtSHA() error = nil, want error")
 	}
@@ -101,13 +101,13 @@ func Test_CloneAtSHA_when_DestExists_thenReturnError(t *testing.T) {
 }
 
 func Test_runGit_when_Failure_ThenMasksURLCredentials(t *testing.T) {
-	// Given: an unknown subcommand makes git fail locally — no network involved.
+	// 准备：一个不存在的子命令会让 git 在本地失败 —— 不涉及网络。
 
-	// When
+	// 执行
 	err := runGit(context.Background(), os.Environ(), io.Discard, "",
 		"not-a-real-git-subcommand", "https://user:secret@example.invalid/x.git")
 
-	// Then
+	// 断言
 	if err == nil {
 		t.Fatal("runGit() error = nil, want error")
 	}

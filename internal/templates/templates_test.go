@@ -73,16 +73,16 @@ func TestDetect(t *testing.T) {
 }
 
 func TestDetect_does_not_treat_directory_marker_as_file(t *testing.T) {
-	// Given: a directory named go.mod must not count as a marker file.
+	// 准备：名为 go.mod 的目录不应被视为标记文件。
 	dir := t.TempDir()
 	if err := os.Mkdir(filepath.Join(dir, "go.mod"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
-	// When
+	// 执行
 	_, ok := Detect(dir)
 
-	// Then
+	// 断言
 	if ok {
 		t.Fatal("Detect() ok = true for a go.mod directory, want false")
 	}
@@ -137,9 +137,9 @@ func TestScript_mapping(t *testing.T) {
 	}
 }
 
-// TestScripts_regressions locks the two defects fixed when the upstream scripts
-// were embedded: build-go.sh must set CGO_ENABLED for both branches, and
-// build-maven.sh must not copy a glob of jars onto a single file.
+// TestScripts_regressions 锁定上游脚本嵌入时修复的两个缺陷：
+// build-go.sh 必须在两个分支中都设置 CGO_ENABLED，且
+// build-maven.sh 不得把一批 jar 通配符复制到单个文件上。
 func TestScripts_regressions(t *testing.T) {
 	t.Run("build-go sets CGO_ENABLED", func(t *testing.T) {
 		content, _ := Script(NameGo)

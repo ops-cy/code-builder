@@ -46,7 +46,7 @@ func Test_imageRefs_rejects_invalid_tag(t *testing.T) {
 }
 
 func Test_ResolveDockerfile_when_RepoOwnDockerfile_thenReturnRepoPath(t *testing.T) {
-	// Given: repo ships a Dockerfile — it must win over any template.
+	// 准备：仓库自带 Dockerfile —— 它必须优先于任何模板。
 	repoDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(repoDir, "Dockerfile"), []byte("FROM scratch\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -55,10 +55,10 @@ func Test_ResolveDockerfile_when_RepoOwnDockerfile_thenReturnRepoPath(t *testing
 		t.Fatal(err)
 	}
 
-	// When
+	// 执行
 	dockerfile, source, err := resolveDockerfile(repoDir)
 
-	// Then
+	// 断言
 	if err != nil {
 		t.Fatalf("resolveDockerfile() error = %v", err)
 	}
@@ -100,16 +100,16 @@ func Test_ResolveDockerfile_when_NoRepoDockerfile_thenUseBuiltinTemplate(t *test
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Given: a repo with only a language marker and no Dockerfile.
+			// 准备：一个只有语言标记文件、没有 Dockerfile 的仓库。
 			repoDir := t.TempDir()
 			if err := os.WriteFile(filepath.Join(repoDir, tt.markerFile), []byte(tt.markerBody), 0o644); err != nil {
 				t.Fatal(err)
 			}
 
-			// When
+			// 执行
 			dockerfile, source, err := resolveDockerfile(repoDir)
 
-			// Then
+			// 断言
 			if err != nil {
 				t.Fatalf("resolveDockerfile() error = %v", err)
 			}
@@ -144,16 +144,16 @@ func Test_ResolveDockerfile_when_NoRepoDockerfile_thenUseBuiltinTemplate(t *test
 }
 
 func Test_ResolveDockerfile_when_NoDockerfileAndNoTemplate_thenReturnClearError(t *testing.T) {
-	// Given: neither a Dockerfile nor a recognised language marker.
+	// 准备：既没有 Dockerfile，也没有可识别的语言标记。
 	repoDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(repoDir, "README.md"), []byte("hi\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	// When
+	// 执行
 	_, _, err := resolveDockerfile(repoDir)
 
-	// Then
+	// 断言
 	if err == nil {
 		t.Fatal("resolveDockerfile() error = nil, want error")
 	}
@@ -162,8 +162,8 @@ func Test_ResolveDockerfile_when_NoDockerfileAndNoTemplate_thenReturnClearError(
 	}
 }
 
-// stubExec replaces execCommand for the duration of the test. Each call is
-// recorded; the handler builds the argv and controls success/failure.
+// stubExec 在测试期间替换 execCommand。每次调用都会被记录；
+// handler 负责构造 argv 并控制成功/失败。
 func stubExec(t *testing.T, handler func(ctx context.Context, name string, args ...string) *exec.Cmd) *[][]string {
 	t.Helper()
 	var calls [][]string
@@ -177,7 +177,7 @@ func stubExec(t *testing.T, handler func(ctx context.Context, name string, args 
 }
 
 func Test_dockerBuild_when_Success_ThenPassesExpectedArgsAndStreamsCommand(t *testing.T) {
-	// Given
+	// 准备
 	logFile := filepath.Join(t.TempDir(), "build.log")
 	logw, err := os.Create(logFile)
 	if err != nil {
@@ -187,12 +187,12 @@ func Test_dockerBuild_when_Success_ThenPassesExpectedArgsAndStreamsCommand(t *te
 
 	calls := stubExec(t, func(_ context.Context, _ string, args ...string) *exec.Cmd {
 		if len(args) > 0 && args[0] == "version" {
-			return exec.Command("go", "version") // any successful command
+			return exec.Command("go", "version") // 任意可成功执行的命令
 		}
 		return exec.Command("go", "version")
 	})
 
-	// When
+	// 执行
 	err = dockerBuild(context.Background(), dockerBuildRequest{
 		ContextDir: "/src",
 		Dockerfile: "/src/Dockerfile",
@@ -200,7 +200,7 @@ func Test_dockerBuild_when_Success_ThenPassesExpectedArgsAndStreamsCommand(t *te
 		Log:        logw,
 	})
 
-	// Then
+	// 断言
 	if err != nil {
 		t.Fatalf("dockerBuild() error = %v", err)
 	}
@@ -223,20 +223,20 @@ func Test_dockerBuild_when_Success_ThenPassesExpectedArgsAndStreamsCommand(t *te
 }
 
 func Test_dockerBuild_when_DaemonUnreachable_thenReturnClearError(t *testing.T) {
-	// Given
+	// 准备
 	stubExec(t, func(ctx context.Context, _ string, args ...string) *exec.Cmd {
-		// `go run` with a nonexistent file exits non-zero quickly.
+		// `go run` 一个不存在的文件会快速以非零码退出。
 		return exec.CommandContext(ctx, "go", "run", "definitely-not-a-file.go")
 	})
 
-	// When
+	// 执行
 	err := dockerBuild(context.Background(), dockerBuildRequest{
 		ContextDir: ".",
 		Dockerfile: "Dockerfile",
 		Log:        os.Stderr,
 	})
 
-	// Then
+	// 断言
 	if err == nil {
 		t.Fatal("dockerBuild() error = nil, want daemon unreachable error")
 	}
@@ -245,8 +245,8 @@ func Test_dockerBuild_when_DaemonUnreachable_thenReturnClearError(t *testing.T) 
 	}
 }
 
-// Test_imageRefs locks the tag/push composition: local tag always, remote ref
-// only when the registry URL is set, login only when credentials are configured.
+// Test_imageRefs 锁定 tag/推送 的组合规则：始终生成本地 tag，仅当设置了 registry URL
+// 时才生成远程 ref，仅当配置了凭据时才登录。
 func Test_imageRefs(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -331,7 +331,7 @@ func Test_imageRefs(t *testing.T) {
 }
 
 func Test_dockerBuild_when_PushRefs_thenBuildThenPushInOrder(t *testing.T) {
-	// Given
+	// 准备
 	logFile := filepath.Join(t.TempDir(), "build.log")
 	logw, err := os.Create(logFile)
 	if err != nil {
@@ -344,7 +344,7 @@ func Test_dockerBuild_when_PushRefs_thenBuildThenPushInOrder(t *testing.T) {
 	})
 	remote := "registry.example.com/tenants/app:a1b2c3d4"
 
-	// When
+	// 执行
 	err = dockerBuild(context.Background(), dockerBuildRequest{
 		ContextDir: "/src",
 		Dockerfile: "/src/Dockerfile",
@@ -353,7 +353,7 @@ func Test_dockerBuild_when_PushRefs_thenBuildThenPushInOrder(t *testing.T) {
 		Log:        logw,
 	})
 
-	// Then
+	// 断言
 	if err != nil {
 		t.Fatalf("dockerBuild() error = %v", err)
 	}
@@ -369,7 +369,7 @@ func Test_dockerBuild_when_PushRefs_thenBuildThenPushInOrder(t *testing.T) {
 }
 
 func Test_dockerBuild_when_Login_thenLoginBeforeBuildAndPasswordNeverLogged(t *testing.T) {
-	// Given
+	// 准备
 	logFile := filepath.Join(t.TempDir(), "build.log")
 	logw, err := os.Create(logFile)
 	if err != nil {
@@ -382,7 +382,7 @@ func Test_dockerBuild_when_Login_thenLoginBeforeBuildAndPasswordNeverLogged(t *t
 	})
 	const secret = "s3cr3t-token"
 
-	// When
+	// 执行
 	err = dockerBuild(context.Background(), dockerBuildRequest{
 		ContextDir: "/src",
 		Dockerfile: "/src/Dockerfile",
@@ -391,7 +391,7 @@ func Test_dockerBuild_when_Login_thenLoginBeforeBuildAndPasswordNeverLogged(t *t
 		Log:        logw,
 	})
 
-	// Then
+	// 断言
 	if err != nil {
 		t.Fatalf("dockerBuild() error = %v", err)
 	}
@@ -411,12 +411,12 @@ func Test_dockerBuild_when_Login_thenLoginBeforeBuildAndPasswordNeverLogged(t *t
 }
 
 func Test_WorkspaceDir_when_DifferentReposSameName_ThenIsolated(t *testing.T) {
-	// Given
+	// 准备
 	ws := t.TempDir()
 	a := config.Repository{Key: "example.com/g1/app", Name: "app"}
 	b := config.Repository{Key: "example.com/g2/app", Name: "app"}
 
-	// When
+	// 执行
 	da, err := workspaceDir(ws, a, sha40)
 	if err != nil {
 		t.Fatal(err)
@@ -426,7 +426,7 @@ func Test_WorkspaceDir_when_DifferentReposSameName_ThenIsolated(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Then
+	// 断言
 	if da == db {
 		t.Fatalf("dirs = %q for both repos, want per-repository isolation", da)
 	}

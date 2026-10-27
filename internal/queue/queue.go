@@ -1,5 +1,5 @@
-// Package queue schedules build jobs with a global concurrency cap while
-// guaranteeing that jobs for the same repository never overlap.
+// Package queue 在全局并发上限下调度构建任务，同时保证同一仓库的
+// 任务永远不会重叠执行。
 package queue
 
 import (
@@ -10,13 +10,13 @@ import (
 	"gitlab-builder/internal/config"
 )
 
-// ErrQueueFull is returned by Enqueue when the pending list is at capacity.
+// ErrQueueFull 在待处理列表已满时由 Enqueue 返回。
 var ErrQueueFull = errors.New("queue: full")
 
-// ErrQueueClosed is returned by Enqueue after Start has shut the queue down.
+// ErrQueueClosed 在 Start 关闭队列后由 Enqueue 返回。
 var ErrQueueClosed = errors.New("queue: closed")
 
-// Job is one queued build run.
+// Job 是一次排队的构建运行。
 type Job struct {
 	BuildID string
 	Repo    config.Repository
@@ -25,9 +25,8 @@ type Job struct {
 	Run     func(ctx context.Context) error
 }
 
-// Queue runs jobs with a global concurrency limit; jobs of the same
-// repository (Repo.Key, the normalised clone URL) never overlap and run FIFO
-// per repository.
+// Queue 在全局并发上限下运行任务；同一仓库（Repo.Key，即规范化后的
+// clone URL）的任务不会重叠，并按仓库以先进先出顺序执行。
 type Queue struct {
 	mu      sync.Mutex
 	cond    *sync.Cond
@@ -39,7 +38,7 @@ type Queue struct {
 	wg      sync.WaitGroup
 }
 
-// New creates a queue with the given worker count and pending capacity.
+// New 创建队列，指定 worker 数量和待处理容量。
 func New(concurrency, maxSize int) *Queue {
 	if concurrency < 1 {
 		concurrency = 1
@@ -56,7 +55,7 @@ func New(concurrency, maxSize int) *Queue {
 	return q
 }
 
-// Enqueue appends a job; it fails when the queue is full or closed.
+// Enqueue 追加一个任务；队列已满或已关闭时返回错误。
 func (q *Queue) Enqueue(j Job) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -71,15 +70,14 @@ func (q *Queue) Enqueue(j Job) error {
 	return nil
 }
 
-// Len returns the number of pending (not yet started) jobs.
+// Len 返回待处理（尚未开始）的任务数量。
 func (q *Queue) Len() int {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	return len(q.pending)
 }
 
-// Start launches workers and blocks until ctx is cancelled and all in-flight
-// jobs have finished.
+// Start 启动 worker，并阻塞直到 ctx 被取消且所有进行中的任务结束。
 func (q *Queue) Start(ctx context.Context) {
 	for i := 0; i < q.limit; i++ {
 		q.wg.Add(1)
@@ -93,8 +91,8 @@ func (q *Queue) Start(ctx context.Context) {
 	q.wg.Wait()
 }
 
-// worker repeatedly picks the oldest pending job whose repository is free,
-// runs it synchronously, then repeats until the queue closes.
+// worker 反复挑选仓库空闲的最早待处理任务，同步执行，然后重复，
+// 直到队列关闭。
 func (q *Queue) worker(ctx context.Context) {
 	defer q.wg.Done()
 	for {
@@ -131,16 +129,16 @@ func (q *Queue) worker(ctx context.Context) {
 	}
 }
 
-// repoKey is the serialisation identity: the normalised clone URL, falling
-// back to the display name when Key is unset (unit-test fixtures).
+// repoKey 是串行化标识：仓库名（URL 的最后一段路径），因此推送到同名
+// 仓库的任务不会重叠。对于没有名称的测试数据，回退到规范化后的 clone URL。
 func repoKey(j Job) string {
-	if j.Repo.Key != "" {
-		return j.Repo.Key
+	if j.Repo.Name != "" {
+		return j.Repo.Name
 	}
-	return j.Repo.Name
+	return j.Repo.Key
 }
 
-// pickLocked returns the index of the oldest job whose repo is free, or -1.
+// pickLocked 返回仓库空闲的最早任务的索引，没有则返回 -1。
 func pickLocked(pending []Job, running map[string]bool) int {
 	for i, j := range pending {
 		if !running[repoKey(j)] {

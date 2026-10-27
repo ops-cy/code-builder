@@ -1,5 +1,5 @@
-// Package server wires the HTTP API: webhook ingestion, build queries, and
-// health checks.
+// Package server 组装 HTTP API：webhook 接收、构建查询以及
+// 健康检查。
 package server
 
 import (
@@ -17,7 +17,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// Server owns the HTTP listener and its lifecycle.
+// Server 持有 HTTP 监听器及其生命周期。
 type Server struct {
 	cfg    config.Config
 	srv    *http.Server
@@ -25,7 +25,7 @@ type Server struct {
 	logger *slog.Logger
 }
 
-// New builds the router, mounts routes, and returns a ready Server.
+// New 构建路由、挂载路由并返回就绪的 Server。
 func New(cfg config.Config, logger *slog.Logger, deps webhook.Deps) *Server {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
@@ -72,16 +72,16 @@ func New(cfg config.Config, logger *slog.Logger, deps webhook.Deps) *Server {
 			Handler:           r,
 			ReadHeaderTimeout: 10 * time.Second,
 			ReadTimeout:       30 * time.Second,
-			WriteTimeout:      5 * time.Minute, // build log downloads can be large
+			WriteTimeout:      5 * time.Minute, // 构建日志下载体积可能很大
 			IdleTimeout:       60 * time.Second,
 		},
 	}
 }
 
-// Handler exposes the gin engine for tests.
+// Handler 暴露 gin 引擎供测试使用。
 func (s *Server) Handler() http.Handler { return s.router }
 
-// Run serves until ctx is cancelled, then shuts down gracefully.
+// Run 提供服务直到 ctx 被取消，然后优雅关闭。
 func (s *Server) Run(ctx context.Context) error {
 	errCh := make(chan error, 1)
 	go func() {

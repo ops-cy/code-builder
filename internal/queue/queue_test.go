@@ -19,7 +19,7 @@ func repoNamed(name string) config.Repository {
 	return config.Repository{Name: name}
 }
 
-// startQueue runs q until ctx cancel; returns a done channel closed on exit.
+// startQueue 运行 q 直到 ctx 取消；返回一个在退出时关闭的 done 通道。
 func startQueue(t *testing.T, q *Queue) context.CancelFunc {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -39,7 +39,7 @@ func startQueue(t *testing.T, q *Queue) context.CancelFunc {
 	return cancel
 }
 
-// tracker records per-repo concurrency and start order.
+// tracker 记录每个仓库的并发情况和启动顺序。
 type tracker struct {
 	mu        sync.Mutex
 	active    map[string]int
@@ -84,12 +84,12 @@ func (tr *tracker) run(repo, id string, hold func()) func(context.Context) error
 }
 
 func Test_Queue_when_TwoRepos_ThenRunInParallel(t *testing.T) {
-	// Given
+	// 准备
 	q := New(2, 10)
 	tr := newTracker()
 	var arrived sync.WaitGroup
 	arrived.Add(2)
-	// Both jobs call Done then Wait: neither returns until both are in-flight.
+	// 两个任务都先调用 Done 再调用 Wait：在两者都进入运行状态前都不会返回。
 	hold := func() {
 		arrived.Done()
 		arrived.Wait()
@@ -101,7 +101,7 @@ func Test_Queue_when_TwoRepos_ThenRunInParallel(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// When
+	// 执行
 	startQueue(t, q)
 	select {
 	case <-waitBoth(tr.started, 2):
@@ -109,7 +109,7 @@ func Test_Queue_when_TwoRepos_ThenRunInParallel(t *testing.T) {
 		t.Fatal("two jobs from different repos did not start in parallel")
 	}
 
-	// Then
+	// 断言
 	tr.mu.Lock()
 	defer tr.mu.Unlock()
 	if tr.maxGlobal < 2 {
@@ -117,7 +117,7 @@ func Test_Queue_when_TwoRepos_ThenRunInParallel(t *testing.T) {
 	}
 }
 
-// waitBoth returns a channel closed after n values have been read from src.
+// waitBoth 返回一个通道，在从 src 读取 n 个值后关闭。
 func waitBoth(src <-chan string, n int) <-chan struct{} {
 	out := make(chan struct{})
 	go func() {
@@ -130,8 +130,8 @@ func waitBoth(src <-chan string, n int) <-chan struct{} {
 }
 
 func Test_Queue_when_SameRepo_ThenNeverOverlapAndFIFO(t *testing.T) {
-	// Given
-	q := New(4, 10) // high global concurrency must not break per-repo serial
+	// 准备
+	q := New(4, 10) // 高全局并发不得破坏单仓库串行
 	tr := newTracker()
 	hold := make(chan struct{})
 	for _, id := range []string{"a1", "a2", "a3"} {
@@ -140,16 +140,16 @@ func Test_Queue_when_SameRepo_ThenNeverOverlapAndFIFO(t *testing.T) {
 		}
 	}
 
-	// When
+	// 执行
 	startQueue(t, q)
-	<-tr.started // a1 begins
-	// a2 must not start while a1 is running
+	<-tr.started // a1 开始
+	// a1 运行期间 a2 不得启动
 	select {
 	case id := <-tr.started:
 		t.Fatalf("job %q started while a1 still running", id)
 	case <-time.After(100 * time.Millisecond):
 	}
-	close(hold) // let all remaining jobs finish immediately
+	close(hold) // 让所有剩余任务立即结束
 	for i := 0; i < 2; i++ {
 		select {
 		case <-tr.started:
@@ -158,7 +158,7 @@ func Test_Queue_when_SameRepo_ThenNeverOverlapAndFIFO(t *testing.T) {
 		}
 	}
 
-	// Then
+	// 断言
 	tr.mu.Lock()
 	defer tr.mu.Unlock()
 	if tr.maxSeen["a"] != 1 {
@@ -173,29 +173,89 @@ func Test_Queue_when_SameRepo_ThenNeverOverlapAndFIFO(t *testing.T) {
 	}
 }
 
+func Test_repoKey_when_NameSet_thenNameWins(t *testing.T) {
+	// 准备：通过两个不同 clone URL 访问到同一个 repo_name。
+	j := Job{Repo: config.Repository{Key: "example.com/a/app", Name: "app"}}
+
+	// 断言
+	if got := repoKey(j); got != "app" {
+		t.Errorf("repoKey() = %q, want app (repo_name)", got)
+	}
+}
+
+func Test_repoKey_when_NameEmpty_thenFallBackToKey(t *testing.T) {
+	j := Job{Repo: config.Repository{Key: "example.com/a/app"}}
+	if got := repoKey(j); got != "example.com/a/app" {
+		t.Errorf("repoKey() = %q, want the clone URL", got)
+	}
+}
+
+func Test_Queue_when_SameRepoNameDifferentURLs_thenSerialised(t *testing.T) {
+	// 准备：两个 clone URL 解析到同一个 repo_name。
+	q := New(4, 10)
+	tr := newTracker()
+	hold := make(chan struct{})
+	if err := q.Enqueue(Job{
+		Repo:    config.Repository{Key: "example.com/team/app", Name: "app"},
+		BuildID: "u1",
+		Run:     tr.run("app", "u1", func() { <-hold }),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Enqueue(Job{
+		Repo:    config.Repository{Key: "example.com/other/app", Name: "app"},
+		BuildID: "u2",
+		Run:     tr.run("app", "u2", nil),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 执行
+	startQueue(t, q)
+	<-tr.started // u1 开始
+
+	// 断言：即使 URL 不同，u2 也不得与 u1 重叠。
+	select {
+	case id := <-tr.started:
+		t.Fatalf("job %q started while another app build was running", id)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(hold)
+	select {
+	case <-tr.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the second job")
+	}
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	if tr.maxSeen["app"] != 1 {
+		t.Errorf("max concurrency for app = %d, want 1", tr.maxSeen["app"])
+	}
+}
+
 func Test_Enqueue_when_Full_thenReturnErrQueueFull(t *testing.T) {
-	// Given
+	// 准备
 	q := New(1, 1)
 	if err := q.Enqueue(Job{Repo: repoNamed("a"), Run: func(context.Context) error { return nil }}); err != nil {
 		t.Fatal(err)
 	}
 
-	// When
+	// 执行
 	err := q.Enqueue(Job{Repo: repoNamed("b"), Run: func(context.Context) error { return nil }})
 
-	// Then
+	// 断言
 	if !errors.Is(err, ErrQueueFull) {
 		t.Errorf("Enqueue() error = %v, want ErrQueueFull", err)
 	}
 }
 
 func Test_Enqueue_when_Closed_thenReturnErrQueueClosed(t *testing.T) {
-	// Given
+	// 准备
 	q := New(1, 1)
 	cancel := startQueue(t, q)
-	cancel() // triggers shutdown
+	cancel() // 触发关闭
 
-	// When (allow shutdown to settle)
+	// 执行（等待关闭完成）
 	var err error
 	for i := 0; i < 100; i++ {
 		err = q.Enqueue(Job{Repo: repoNamed("a"), Run: func(context.Context) error { return nil }})
@@ -205,26 +265,26 @@ func Test_Enqueue_when_Closed_thenReturnErrQueueClosed(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	// Then
+	// 断言
 	if !errors.Is(err, ErrQueueClosed) {
 		t.Errorf("Enqueue() error = %v, want ErrQueueClosed", err)
 	}
 }
 
 func Test_Queue_when_Cancelled_ThenStartReturns(t *testing.T) {
-	// Given
+	// 准备
 	q := New(1, 1)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 
-	// When
+	// 执行
 	go func() {
 		q.Start(ctx)
 		close(done)
 	}()
 	cancel()
 
-	// Then
+	// 断言
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):

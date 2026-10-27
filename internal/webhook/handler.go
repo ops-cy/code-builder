@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -23,32 +25,29 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// maxBodyBytes limits the webhook payload size.
+// maxBodyBytes 限制 webhook 负载的大小。
 const maxBodyBytes = 1 << 20 // 1 MiB
 
-// buildTimeout bounds one build job (clone + docker build) so a hung git or
-// docker child process can never occupy a worker slot forever.
-const buildTimeout = 30 * time.Minute
-
-// Deps groups the handler's dependencies. Everything repository-specific is
-// derived per event; only global policy lives here.
+// Deps 汇总 handler 的依赖项。所有与具体仓库相关的内容都在每个事件中推导，
+// 这里只存放全局策略。
 type Deps struct {
 	Domain        string
 	Branches      []string
-	DeployKeyPath string // optional SSH deploy key for all clones (env-provided)
+	DeployKeyPath string // 可选的 SSH 部署密钥，用于所有 clone（由环境变量提供）
 	Secret        string
 	Store         *store.Store
 	Queue         *queue.Queue
 	Logger        *slog.Logger
 	Workspace     string
-	Registry      config.RegistryConfig // optional image push target (URL-gated)
-	Build         config.BuildConfig    // tag policy (defaults to sha8 when empty)
-	Deploy        config.DeployConfig   // optional post-build compose up -d
-	Notify        notify.Sender         // optional pipeline notifications (nil = off)
+	Registry      config.RegistryConfig // 可选的镜像推送目标（受 URL 白名单限制）
+	Build         config.BuildConfig    // tag 策略（为空时默认 latest）
+	Timeouts      config.TimeoutsConfig // 各步骤的超时上限（job/clone/build/deploy）
+	Deploy        config.DeployConfig   // 可选的构建后 compose up -d
+	Notify        notify.Sender         // 可选的流水线通知（nil 表示关闭）
 }
 
-// Handler returns the gin handler for POST /webhook. The dedup table and
-// image registry are per-handler state shared across requests.
+// Handler 返回处理 POST /webhook 的 gin handler。去重表和镜像 registry 都是
+// 该 handler 内部、跨请求共享的状态。
 func Handler(deps Deps) gin.HandlerFunc {
 	dup := newDedup()
 	imgs := newImageRegistry()
@@ -111,8 +110,8 @@ func Handler(deps Deps) gin.HandlerFunc {
 		}
 		tag := deps.Build.ResolveTag(branch, sha)
 
-		// Redelivery guard: the same commit of the same repository must not
-		// be built twice while its build is still queued or running.
+		// 重复投递防护：同一仓库的同一 commit 在其构建仍在排队或运行时，
+		// 不得再次构建。
 		dkey := repo.Key + "@" + sha
 		if id, ok := dup.get(dkey); ok {
 			logger.InfoContext(c.Request.Context(), "webhook: duplicate delivery skipped",
@@ -131,6 +130,7 @@ func Handler(deps Deps) gin.HandlerFunc {
 			Actor:         ev.actor(),
 			CommitSubject: ev.commitSubject(sha),
 			Status:        store.StatusQueued,
+			Tag:           tag,
 			CreatedAt:     time.Now(),
 		})
 		dup.put(dkey, build.ID)
@@ -153,7 +153,7 @@ func Handler(deps Deps) gin.HandlerFunc {
 				b.Error = err.Error()
 				b.FinishedAt = time.Now()
 			})
-			notifyEvent(deps, build.ID, notify.EventFailure, err.Error(), "")
+			notifyEvent(deps, build.ID, notify.EventFailure, err.Error())
 			logger.ErrorContext(c.Request.Context(), "webhook: enqueue failed",
 				slog.String("build_id", build.ID),
 				slog.String("reason", err.Error()),
@@ -180,8 +180,8 @@ func Handler(deps Deps) gin.HandlerFunc {
 	}
 }
 
-// validCommitSHA requires a full hex object id: 40 (SHA-1, Git default) or
-// 64 (SHA-256) characters. The 8-char image tag is cut from it later.
+// validCommitSHA 要求完整的十六进制对象 id：40 个字符（SHA-1，Git 默认）
+// 或 64 个字符（SHA-256）。后面会从中截取 8 个字符作为镜像 tag。
 func validCommitSHA(s string) bool {
 	if len(s) != 40 && len(s) != 64 {
 		return false
@@ -195,11 +195,9 @@ func validCommitSHA(s string) bool {
 	return true
 }
 
-// pipeline returns the job runner: mark running, build with timeout, record
-// result and full reason in both the build log and the store. When deployment
-// is enabled and the resolved tag matches deploy.tag, it also brings the
-// service up from the freshly built local image. A deploy failure is recorded
-// in DeployError but never downgrades a successful build.
+// pipeline 返回任务执行函数：标记为运行中、带超时地执行构建、把结果和完整
+// 原因同时写入构建日志和 store，然后在启用部署且存在匹配仓库名的目标时
+// 执行部署。
 func pipeline(deps Deps, buildID string, repo config.Repository, branch, sha, tag string) func(context.Context) error {
 	return func(ctx context.Context) error {
 		started := time.Now()
@@ -207,7 +205,7 @@ func pipeline(deps Deps, buildID string, repo config.Repository, branch, sha, ta
 			b.Status = store.StatusRunning
 			b.StartedAt = time.Now()
 		})
-		notifyEvent(deps, buildID, notify.EventStarted, "", "")
+		notifyEvent(deps, buildID, notify.EventStarted, "")
 
 		logf, err := deps.Store.OpenLog(buildID)
 		if err != nil {
@@ -216,7 +214,7 @@ func pipeline(deps Deps, buildID string, repo config.Repository, branch, sha, ta
 				b.Error = err.Error()
 				b.FinishedAt = time.Now()
 			})
-			notifyEvent(deps, buildID, notify.EventFailure, err.Error(), "")
+			notifyEvent(deps, buildID, notify.EventFailure, err.Error())
 			return fmt.Errorf("open log: %w", err)
 		}
 		defer logf.Close()
@@ -224,16 +222,18 @@ func pipeline(deps Deps, buildID string, repo config.Repository, branch, sha, ta
 		fmt.Fprintf(logf, "build %s repo=%s url=%s branch=%s sha=%s image=%s tag=%s\n",
 			buildID, repo.Name, gitx.MaskURL(repo.URL), branch, sha, repo.Build.Image, tag)
 
-		bctx, cancel := context.WithTimeout(ctx, buildTimeout)
+		jobCtx, cancel := context.WithTimeout(ctx, deps.Timeouts.JobDuration())
 		defer cancel()
-		tags, err := builder.Build(bctx, builder.Request{
-			Repo:      repo,
-			Branch:    branch,
-			SHA:       sha,
-			Tag:       tag,
-			Log:       logf,
-			Workspace: deps.Workspace,
-			Registry:  deps.Registry,
+		tags, err := builder.Build(jobCtx, builder.Request{
+			Repo:         repo,
+			Branch:       branch,
+			SHA:          sha,
+			Tag:          tag,
+			Log:          logf,
+			Workspace:    deps.Workspace,
+			Registry:     deps.Registry,
+			CloneTimeout: deps.Timeouts.CloneDuration(),
+			BuildTimeout: deps.Timeouts.BuildDuration(),
 		})
 		duration := time.Since(started).Round(time.Millisecond)
 		if err != nil {
@@ -248,7 +248,7 @@ func pipeline(deps Deps, buildID string, repo config.Repository, branch, sha, ta
 				slog.String("repo", repo.Name),
 				slog.Duration("duration", duration),
 				slog.Any("err", err))
-			notifyEvent(deps, buildID, notify.EventFailure, err.Error(), "")
+			notifyEvent(deps, buildID, notify.EventFailure, err.Error())
 			return err
 		}
 
@@ -257,30 +257,7 @@ func pipeline(deps Deps, buildID string, repo config.Repository, branch, sha, ta
 			b.ImageTags = tags
 		})
 
-		deployErr := ""
-		if deps.Deploy.Enabled && tag == deps.Deploy.Tag {
-			if derr := deploy.Up(ctx, deploy.Request{
-				Service: repo.Build.Image,
-				Config:  deps.Deploy,
-				Log:     logf,
-			}); derr != nil {
-				deployErr = derr.Error()
-				deps.Store.Update(buildID, func(b *store.Build) { b.DeployError = derr.Error() })
-				fmt.Fprintf(logf, "==> deploy failed service=%s error=%s\n", repo.Build.Image, derr)
-				deps.Logger.ErrorContext(ctx, "deploy failed",
-					slog.String("build_id", buildID),
-					slog.String("repo", repo.Name),
-					slog.String("service", repo.Build.Image),
-					slog.Any("err", derr))
-			} else {
-				deps.Store.Update(buildID, func(b *store.Build) { b.Deployed = true })
-				fmt.Fprintf(logf, "==> deploy success service=%s\n", repo.Build.Image)
-				deps.Logger.InfoContext(ctx, "deploy succeeded",
-					slog.String("build_id", buildID),
-					slog.String("repo", repo.Name),
-					slog.String("service", repo.Build.Image))
-			}
-		}
+		deployAfterBuild(ctx, deps, buildID, repo.Name, logf)
 
 		deps.Store.Update(buildID, func(b *store.Build) { b.FinishedAt = time.Now() })
 		fmt.Fprintf(logf, "==> result success duration=%s image=%s\n", duration, strings.Join(tags, ", "))
@@ -289,14 +266,85 @@ func pipeline(deps Deps, buildID string, repo config.Repository, branch, sha, ta
 			slog.String("repo", repo.Name),
 			slog.String("tags", strings.Join(tags, ",")),
 			slog.Duration("duration", duration))
-		notifyEvent(deps, buildID, notify.EventSuccess, "", deployErr)
+		notifyEvent(deps, buildID, notify.EventSuccess, "")
 		return nil
 	}
 }
 
-// notifyEvent sends one pipeline notification without blocking or affecting the
-// build: delivery failures are logged and recorded in Build.NotifyError only.
-func notifyEvent(deps Deps, buildID string, ev notify.Event, errMsg, deployErr string) {
+// 部署接缝：使用包级变量，便于测试替换 docker CLI。
+var (
+	deployUp = deploy.Up
+	deployPs = deploy.Ps
+)
+
+// deployAfterBuild 应用与 repoName 匹配的已配置部署目标。跳过或失败的部署
+// 永远不会改变构建成功的状态；其结果会记录到 store 中，供成功卡片使用。
+func deployAfterBuild(ctx context.Context, deps Deps, buildID, repoName string, logf io.Writer) {
+	record := func(status, reason, target, errMsg, output string, deployed bool) {
+		deps.Store.Update(buildID, func(b *store.Build) {
+			b.DeployStatus = status
+			b.DeployReason = reason
+			b.DeployTarget = target
+			b.DeployError = errMsg
+			b.DeployOutput = output
+			b.Deployed = deployed
+		})
+	}
+
+	if !deps.Deploy.Enabled {
+		reason := "deploy not enabled"
+		fmt.Fprintf(logf, "deploy skipped: %s\n", reason)
+		record(notify.DeploySkipped, reason, "", "", "", false)
+		return
+	}
+	tgt, ok := deps.Deploy.Target(repoName)
+	if !ok {
+		reason := "no target for " + repoName
+		fmt.Fprintf(logf, "deploy skipped: %s\n", reason)
+		record(notify.DeploySkipped, reason, "", "", "", false)
+		return
+	}
+
+	target := filepath.Join(tgt.Dir, tgt.ComposeFile)
+	req := deploy.Request{
+		Repo: repoName,
+		Target: deploy.Target{
+			Dir:         tgt.Dir,
+			ComposeFile: tgt.ComposeFile,
+			Service:     tgt.Service,
+		},
+		Timeout: deps.Timeouts.DeployDuration(),
+		Log:     logf,
+	}
+	if err := deployUp(ctx, req); err != nil {
+		output, psErr := deployPs(ctx, req)
+		if psErr != nil {
+			if output != "" {
+				output += "\n"
+			}
+			output += "compose ps error: " + psErr.Error()
+		}
+		fmt.Fprintf(logf, "==> deploy failed repo=%s target=%s error=%s\n", repoName, target, err)
+		deps.Logger.ErrorContext(ctx, "deploy failed",
+			slog.String("build_id", buildID),
+			slog.String("repo", repoName),
+			slog.String("target", target),
+			slog.Any("err", err))
+		record(notify.DeployFailed, "", target, err.Error(), output, false)
+		return
+	}
+
+	fmt.Fprintf(logf, "==> deploy success repo=%s target=%s\n", repoName, target)
+	deps.Logger.InfoContext(ctx, "deploy succeeded",
+		slog.String("build_id", buildID),
+		slog.String("repo", repoName),
+		slog.String("target", target))
+	record(notify.DeployDeployed, "", target, "", "", true)
+}
+
+// notifyEvent 发送一条流水线通知，既不阻塞也不影响构建：投递失败只会被
+// 记录到 Build.NotifyError 中。
+func notifyEvent(deps Deps, buildID string, ev notify.Event, errMsg string) {
 	if deps.Notify == nil || !deps.Notify.Wants(ev) {
 		return
 	}
@@ -312,18 +360,31 @@ func notifyEvent(deps Deps, buildID string, ev notify.Event, errMsg, deployErr s
 		}
 		dur = end.Sub(b.StartedAt)
 	}
-	deps.Notify.Async(notify.Message{
-		Event:     ev,
-		App:       b.Repo,
-		Actor:     b.Actor,
-		Branch:    b.Branch,
-		ShortSHA:  b.ShortSHA,
-		Duration:  dur,
-		Subject:   b.CommitSubject,
-		Err:       errMsg,
-		DeployErr: deployErr,
-		Now:       time.Now(),
-	}, func(err error) {
+	msg := notify.Message{
+		Event:        ev,
+		App:          b.Repo,
+		Actor:        b.Actor,
+		Branch:       b.Branch,
+		ShortSHA:     b.ShortSHA,
+		Image:        b.Repo,
+		Duration:     dur,
+		Subject:      b.CommitSubject,
+		Err:          errMsg,
+		DeployStatus: b.DeployStatus,
+		DeployReason: b.DeployReason,
+		DeployTarget: b.DeployTarget,
+		DeployError:  b.DeployError,
+		DeployOutput: b.DeployOutput,
+		StartedAt:    b.StartedAt,
+		Now:          time.Now(),
+	}
+	if b.Tag != "" {
+		msg.Image = b.Repo + ":" + b.Tag
+	}
+	if ev == notify.EventFailure {
+		msg.LogTail = deps.Store.ReadLogTail(buildID, 30)
+	}
+	deps.Notify.Async(msg, func(err error) {
 		if err == nil {
 			return
 		}

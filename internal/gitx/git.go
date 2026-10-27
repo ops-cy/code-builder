@@ -1,4 +1,4 @@
-// Package gitx clones Git repositories over SSH or HTTPS at an exact commit.
+// Package gitx 通过 SSH 或 HTTPS 在精确的提交上克隆 Git 仓库。
 package gitx
 
 import (
@@ -14,26 +14,26 @@ import (
 	"time"
 )
 
-// cloneTimeout bounds a whole clone+fetch+checkout sequence so a stalled
-// network can never hold a build worker slot forever.
+// cloneTimeout 限制整个 clone+fetch+checkout 过程的时长，确保障碍的网络
+// 永远不会一直占住一个构建工作槽位。
 const cloneTimeout = 15 * time.Minute
 
-// CloneReq describes one clone-at-commit operation.
+// CloneReq 描述一次 clone-at-commit 操作。
 type CloneReq struct {
 	URL        string
 	Branch     string
 	SHA        string
 	Dest       string
-	DeployKey  string // path to an SSH private key; "" uses default ssh identity
-	KnownHosts string // path to a persistent known_hosts; "" uses the ssh default
+	DeployKey  string        // SSH 私钥路径；为 "" 时使用默认 ssh 身份
+	KnownHosts string        // 持久化 known_hosts 的路径；为 "" 时使用 ssh 默认值
+	Timeout    time.Duration // 整个 clone+checkout 的时限；为 0 时使用 cloneTimeout
 }
 
-// SSHCommand returns the GIT_SSH_COMMAND value for the given deploy key.
-// An empty key path yields "" so the default ssh configuration applies.
+// SSHCommand 返回给定部署密钥对应的 GIT_SSH_COMMAND 值。
+// 密钥路径为空时返回 ""，从而沿用默认 ssh 配置。
 //
-// Host keys are verified: accept-new trusts a host on first contact (TOFU)
-// and stores it in knownHosts, but still REJECTS a changed key afterwards —
-// verification is never disabled outright.
+// 主机密钥会被验证：accept-new 在首次连接时信任该主机（TOFU）并写入 knownHosts，
+// 但之后仍会拒绝已变化的密钥 —— 验证绝不会被完全关闭。
 func SSHCommand(deployKey, knownHosts string) string {
 	if deployKey == "" {
 		return ""
@@ -46,11 +46,9 @@ func SSHCommand(deployKey, knownHosts string) string {
 	return cmd
 }
 
-// CloneAtSHA shallow-clones the repository (Dest must not exist), then checks
-// out exactly req.SHA — never the branch tip. Git output streams to logw
-// when non-nil. Environment is per-command (no process-global mutation), and
-// interactive credential prompts are disabled so a missing credential fails
-// fast instead of hanging until the build timeout.
+// CloneAtSHA 浅克隆仓库（Dest 必须不存在），然后精确检出 req.SHA —— 而不是分支尖端。
+// Git 输出在 logw 非 nil 时流式写入。环境变量按命令设置（不做进程级修改），
+// 并且禁用交互式凭据提示，使缺失凭据能快速失败，而不是挂起到构建超时。
 func CloneAtSHA(ctx context.Context, req CloneReq, logw io.Writer) error {
 	if _, err := os.Stat(req.Dest); err == nil {
 		return fmt.Errorf("gitx: destination already exists: %s", req.Dest)
@@ -58,7 +56,11 @@ func CloneAtSHA(ctx context.Context, req CloneReq, logw io.Writer) error {
 	if logw == nil {
 		logw = io.Discard
 	}
-	ctx, cancel := context.WithTimeout(ctx, cloneTimeout)
+	timeout := req.Timeout
+	if timeout <= 0 {
+		timeout = cloneTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	if req.KnownHosts != "" {
@@ -75,9 +77,8 @@ func CloneAtSHA(ctx context.Context, req CloneReq, logw io.Writer) error {
 	if err := runGit(ctx, env, logw, "", "clone", "--no-checkout", "--depth", "50", "--branch", req.Branch, req.URL, req.Dest); err != nil {
 		return fmt.Errorf("gitx: clone: %w", err)
 	}
-	// The requested commit may already be within the shallow history; fetch by
-	// SHA is best-effort (servers must allow it) and failure is tolerated —
-	// the checkout below is the actual correctness gate.
+	// 所请求的提交可能已在浅历史中；按 SHA 执行 fetch 属于尽力而为（服务器需允许），
+	// 其失败可以容忍 —— 下面的 checkout 才是真正的正确性关卡。
 	if err := runGit(ctx, env, logw, req.Dest, "fetch", "--depth", "50", "origin", req.SHA); err != nil {
 		fmt.Fprintf(logw, "gitx: fetch of %s failed (likely already present): %v\n", req.SHA, err)
 	}
@@ -87,9 +88,8 @@ func CloneAtSHA(ctx context.Context, req CloneReq, logw io.Writer) error {
 	return nil
 }
 
-// runGit executes git with the given environment; dir non-empty sets the
-// working directory. On failure the error carries the combined output tail
-// with URL userinfo credentials masked.
+// runGit 使用给定环境执行 git；dir 非空时设置工作目录。失败时返回的错误会附带
+// 合并输出的尾部，并对 URL 中的 userinfo 凭据做掩码处理。
 func runGit(ctx context.Context, env []string, logw io.Writer, dir string, args ...string) error {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
@@ -107,9 +107,9 @@ func runGit(ctx context.Context, env []string, logw io.Writer, dir string, args 
 	return nil
 }
 
-// MaskURL redacts userinfo credentials in a URL before it reaches a log or
-// an error message: "https://user:pass@host/x" becomes "https://***@host/x".
-// scp-style "git@host:path" carries no password and is returned unchanged.
+// MaskURL 在 URL 进入日志或错误信息之前隐藏其中的 userinfo 凭据：
+// "https://user:pass@host/x" 变成 "https://***@host/x"。
+// scp 形式的 "git@host:path" 不携带密码，原样返回。
 func MaskURL(u string) string {
 	schemeEnd := strings.Index(u, "://")
 	if schemeEnd < 0 {
@@ -121,7 +121,7 @@ func MaskURL(u string) string {
 		return u
 	}
 	if slash := strings.IndexByte(rest, '/'); slash >= 0 && slash < at {
-		return u // the '@' is part of the path, not userinfo
+		return u // '@' 属于路径的一部分，而不是 userinfo
 	}
 	return u[:schemeEnd+3] + "***" + rest[at:]
 }

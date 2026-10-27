@@ -1,9 +1,8 @@
-// Package templates provides built-in, multi-stage Dockerfiles used as a
-// fallback when a repository does not ship one of its own.
+// Package templates 提供内置的多阶段 Dockerfile，当仓库未自带
+// Dockerfile 时作为回退方案使用。
 //
-// Selection is by language marker files at the repository root (see Detect). A
-// repository-provided Dockerfile always takes precedence over these templates;
-// the builder only consults this package when the repo has none.
+// 选择依据是仓库根目录下的语言标记文件（见 Detect）。仓库自带的 Dockerfile
+// 始终优先于这些模板；仅当仓库没有 Dockerfile 时，构建器才会查阅本包。
 package templates
 
 import (
@@ -17,7 +16,7 @@ import (
 //go:embed go.Dockerfile node.Dockerfile vue.Dockerfile java.Dockerfile gradle.Dockerfile python.Dockerfile php.Dockerfile scripts/*.sh
 var files embed.FS
 
-// Name identifies a built-in template.
+// Name 标识一个内置模板。
 type Name string
 
 const (
@@ -30,19 +29,18 @@ const (
 	NamePhp    Name = "php"
 )
 
-// Template is a detected built-in build recipe.
+// Template 是一个检测到的内置构建配方。
 type Template struct {
 	Name    Name
 	Content []byte
 }
 
-// ScriptPath is the fixed location, relative to the repository root, where the
-// builder materialises the build script a template invokes. Templates reference
-// this path verbatim (e.g. `RUN bash .gitlab-builder/build.sh 0`).
+// ScriptPath 是构建器写入模板所调用构建脚本的固定位置（相对于仓库根目录）。
+// 模板会原样引用该路径（例如 `RUN bash .gitlab-builder/build.sh 0`）。
 const ScriptPath = ".gitlab-builder/build.sh"
 
-// scriptByTemplate maps a template to the embedded build script it runs. A
-// template absent from this map uses no script (e.g. Gradle).
+// scriptByTemplate 将模板映射到其运行的嵌入式构建脚本。不在此映射中的
+// 模板不使用脚本（例如 Gradle）。
 var scriptByTemplate = map[Name]string{
 	NameGo:     "scripts/build-go.sh",
 	NameJava:   "scripts/build-maven.sh",
@@ -52,9 +50,8 @@ var scriptByTemplate = map[Name]string{
 	NamePhp:    "scripts/build-php.sh",
 }
 
-// Script returns the build script that the named template invokes (its content
-// is written to ScriptPath by the builder). ok is false when the template uses
-// no script.
+// Script 返回指定模板所调用的构建脚本（构建器会将其内容写入 ScriptPath）。
+// 当该模板不使用脚本时 ok 为 false。
 func Script(name Name) (content []byte, ok bool) {
 	path, ok := scriptByTemplate[name]
 	if !ok {
@@ -67,10 +64,9 @@ func Script(name Name) (content []byte, ok bool) {
 	return content, true
 }
 
-// Detect inspects repoDir for language marker files and returns the matching
-// built-in template. It returns ok=false when no marker matches. Detection
-// order is Go, Maven, Gradle, package.json (Vue before plain Node), then
-// Python, then PHP (composer.json).
+// Detect 检查 repoDir 中的语言标记文件并返回匹配的内置模板。没有标记匹配
+// 时返回 ok=false。检测顺序为 Go、Maven、Gradle、package.json（Vue 先于
+// 纯 Node），然后是 Python，最后是 PHP（composer.json）。
 func Detect(repoDir string) (Template, bool) {
 	name, ok := detectName(repoDir)
 	if !ok {
@@ -104,9 +100,8 @@ func detectName(repoDir string) (Name, bool) {
 	return "", false
 }
 
-// isPythonProject reports whether the repo root carries any Python dependency
-// marker the build script understands: requirements.txt, Pipfile, or
-// pyproject.toml.
+// isPythonProject 报告仓库根目录是否带有构建脚本能够识别的 Python 依赖
+// 标记：requirements.txt、Pipfile 或 pyproject.toml。
 func isPythonProject(repoDir string) bool {
 	for _, marker := range []string{"requirements.txt", "Pipfile", "pyproject.toml"} {
 		if isFile(filepath.Join(repoDir, marker)) {
@@ -121,9 +116,9 @@ func isFile(path string) bool {
 	return err == nil && !st.IsDir()
 }
 
-// packageHasVue reports whether package.json declares Vue — Vue itself, Nuxt, a
-// @vue/* scoped package, or any vue-* helper — in dependencies or
-// devDependencies. Unparseable package.json is treated as non-Vue.
+// packageHasVue 报告 package.json 是否在 dependencies 或 devDependencies 中
+// 声明了 Vue —— Vue 本身、Nuxt、@vue/* 作用域包，或任意 vue-* 辅助包。
+// 无法解析的 package.json 视为非 Vue。
 func packageHasVue(repoDir string) bool {
 	data, err := os.ReadFile(filepath.Join(repoDir, "package.json"))
 	if err != nil {

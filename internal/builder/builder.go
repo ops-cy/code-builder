@@ -1,6 +1,5 @@
-// Package builder clones a repository at an exact commit and builds a local
-// Docker image from it via the docker CLI (talking to the daemon through the
-// mounted Docker socket).
+// Package builder 在精确的提交上克隆仓库，并通过 docker CLI（经由挂载的 Docker
+// socket 与守护进程通信）基于该仓库构建本地 Docker 镜像。
 package builder
 
 import (
@@ -17,26 +16,26 @@ import (
 	"gitlab-builder/internal/gitx"
 )
 
-// Request is the resolved build input.
+// Request 是解析后的构建输入。
 type Request struct {
 	Repo      config.Repository
 	Branch    string
 	SHA       string
-	Tag       string // resolved image tag (config-driven; sha8 when unset)
+	Tag       string // 解析后的镜像 tag（由配置驱动；未设置时为 sha8）
 	Log       *os.File
 	Workspace string
-	// Registry is the optional push target; when its URL is empty the image
-	// stays local-only.
+	// Registry 是可选的推送目标；当其 URL 为空时，镜像仅保留在本地。
 	Registry config.RegistryConfig
+	// CloneTimeout / BuildTimeout 约束克隆和 docker build 步骤的时长；为零时沿用包内的默认值。
+	CloneTimeout time.Duration
+	BuildTimeout time.Duration
 }
 
-// Build clones the repo at SHA, selects the build recipe (the repository's own
-// root Dockerfile, else a built-in language template), computes the sha8 tag,
-// and runs docker build. When req.Registry is enabled the image is also tagged
-// with a fully-qualified remote ref and pushed after a successful build.
-// Progress is written to req.Log: clone timings, the chosen dockerfile source,
-// the docker command and its output, the final image tags. Errors never contain
-// credentials (URLs are masked, registry passwords are never logged).
+// Build 在 SHA 处克隆仓库，选择构建配方（优先使用仓库自带的根目录 Dockerfile，否则使用
+// 内置语言模板），计算 sha8 tag，然后执行 docker build。当 req.Registry 启用时，镜像还会被
+// 打上完整限定的远程 ref，并在构建成功后推送。
+// 进度写入 req.Log：克隆耗时、所选 dockerfile 来源、docker 命令及其输出、最终镜像 tag。
+// 错误信息中绝不包含凭据（URL 会被掩码，registry 密码从不写入日志）。
 func Build(ctx context.Context, req Request) ([]string, error) {
 	fmt.Fprintf(req.Log, "==> clone start repo=%s url=%s branch=%s sha=%s\n",
 		req.Repo.Name, gitx.MaskURL(req.Repo.URL), req.Branch, req.SHA)
@@ -58,6 +57,7 @@ func Build(ctx context.Context, req Request) ([]string, error) {
 		Dest:       dest,
 		DeployKey:  req.Repo.DeployKeyPath,
 		KnownHosts: filepath.Join(req.Workspace, ".ssh", "known_hosts"),
+		Timeout:    req.CloneTimeout,
 	}, req.Log); err != nil {
 		return nil, fmt.Errorf("builder: clone: %w", err)
 	}
@@ -84,6 +84,7 @@ func Build(ctx context.Context, req Request) ([]string, error) {
 		PushRefs:   pushRefs,
 		Login:      login,
 		Log:        req.Log,
+		Timeout:    req.BuildTimeout,
 	}); err != nil {
 		return nil, fmt.Errorf("builder: docker build: %w", err)
 	}
@@ -91,12 +92,11 @@ func Build(ctx context.Context, req Request) ([]string, error) {
 	return tags, nil
 }
 
-// imageRefs composes the docker tag arguments, the subset to push, and the
-// optional registry login from an image name and an already-resolved tag. It is
-// pure (no docker, no git) so the push composition is unit-testable:
-//   - local tag   {image}:{tag}                     (always)
-//   - remote ref  {url}[/{project}]/{image}:{tag}   (only when enabled)
-//   - login       set only when a username is configured
+// imageRefs 依据镜像名和已解析的 tag，组合出 docker tag 参数、需要推送的子集以及可选的
+// registry 登录信息。该函数是纯函数（不涉及 docker，也不涉及 git），因此推送组合逻辑可做单元测试：
+//   - 本地 tag   {image}:{tag}                     （始终生成）
+//   - 远程 ref   {url}[/{project}]/{image}:{tag}   （仅在启用时生成）
+//   - 登录       仅当配置了用户名时才设置
 func imageRefs(image, tag string, reg config.RegistryConfig) (tags, pushRefs []string, login *dockerLogin, err error) {
 	if err := config.ValidateTag(tag); err != nil {
 		return nil, nil, nil, err
@@ -118,10 +118,9 @@ func imageRefs(image, tag string, reg config.RegistryConfig) (tags, pushRefs []s
 	return tags, pushRefs, login, nil
 }
 
-// workspaceDir returns the per-task clone directory:
-// {workspace}/{name}-{repoHash}-{sha8}. The name is pre-sanitised, but the
-// result is re-checked against workspace root so no event-supplied value can
-// ever escape the workspace (path traversal defence in depth).
+// workspaceDir 返回每个任务的克隆目录：
+// {workspace}/{name}-{repoHash}-{sha8}。name 已预先净化，但结果仍会对照 workspace 根目录
+// 再次校验，确保任何来自事件的值都无法逃逸出 workspace（纵深防御式的路径穿越防护）。
 func workspaceDir(workspace string, repo config.Repository, sha string) (string, error) {
 	repoHash := sha256hex(repo.Key)[:8]
 	short := sha

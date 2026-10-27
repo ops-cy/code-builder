@@ -9,12 +9,14 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"gitlab-builder/internal/config"
+	"gitlab-builder/internal/deploy"
 	"gitlab-builder/internal/notify"
 	"gitlab-builder/internal/queue"
 	"gitlab-builder/internal/store"
@@ -101,55 +103,55 @@ func doWebhook(r *gin.Engine, token string, body io.Reader) *httptest.ResponseRe
 }
 
 func Test_Webhook_when_WrongSecret_thenReturn401(t *testing.T) {
-	// Given
+	// 准备
 	r := newRouter(newTestDeps(t, queue.New(1, 10)))
 
-	// When
+	// 执行
 	w := doWebhook(r, "wrong", pushBody(t, basePushEvent()))
 
-	// Then
+	// 断言
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("status = %d, want 401", w.Code)
 	}
 }
 
 func Test_Webhook_when_MissingSecret_thenReturn401(t *testing.T) {
-	// Given
+	// 准备
 	r := newRouter(newTestDeps(t, queue.New(1, 10)))
 
-	// When
+	// 执行
 	w := doWebhook(r, "", pushBody(t, basePushEvent()))
 
-	// Then
+	// 断言
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("status = %d, want 401", w.Code)
 	}
 }
 
 func Test_Webhook_when_InvalidJSON_thenReturn400(t *testing.T) {
-	// Given
+	// 准备
 	r := newRouter(newTestDeps(t, queue.New(1, 10)))
 
-	// When
+	// 执行
 	w := doWebhook(r, testSecret, strings.NewReader("{not json"))
 
-	// Then
+	// 断言
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", w.Code)
 	}
 }
 
 func Test_Webhook_when_TagPush_thenReturn202Ignored(t *testing.T) {
-	// Given
+	// 准备
 	r := newRouter(newTestDeps(t, queue.New(1, 10)))
 	ev := basePushEvent()
 	ev["object_kind"] = "tag_push"
 	ev["ref"] = "refs/tags/v1.0"
 
-	// When
+	// 执行
 	w := doWebhook(r, testSecret, pushBody(t, ev))
 
-	// Then
+	// 断言
 	if w.Code != http.StatusAccepted {
 		t.Errorf("status = %d, want 202", w.Code)
 	}
@@ -159,16 +161,16 @@ func Test_Webhook_when_TagPush_thenReturn202Ignored(t *testing.T) {
 }
 
 func Test_Webhook_when_DeletePush_thenReturn202Ignored(t *testing.T) {
-	// Given
+	// 准备
 	r := newRouter(newTestDeps(t, queue.New(1, 10)))
 	ev := basePushEvent()
 	ev["after"] = "0000000000000000000000000000000000000000"
 	ev["checkout_sha"] = nil
 
-	// When
+	// 执行
 	w := doWebhook(r, testSecret, pushBody(t, ev))
 
-	// Then
+	// 断言
 	if w.Code != http.StatusAccepted {
 		t.Errorf("status = %d, want 202", w.Code)
 	}
@@ -178,17 +180,17 @@ func Test_Webhook_when_DeletePush_thenReturn202Ignored(t *testing.T) {
 }
 
 func Test_Webhook_when_WrongHost_thenReturn202HostNotAllowed(t *testing.T) {
-	// Given
+	// 准备
 	r := newRouter(newTestDeps(t, queue.New(1, 10)))
 	ev := basePushEvent()
 	proj := ev["project"].(map[string]any)
 	proj["git_ssh_url"] = "ssh://git@evil.example.org:20022/other/repo.git"
 	proj["git_http_url"] = "https://evil.example.org/other/repo.git"
 
-	// When
+	// 执行
 	w := doWebhook(r, testSecret, pushBody(t, ev))
 
-	// Then
+	// 断言
 	if w.Code != http.StatusAccepted {
 		t.Errorf("status = %d, want 202", w.Code)
 	}
@@ -198,17 +200,17 @@ func Test_Webhook_when_WrongHost_thenReturn202HostNotAllowed(t *testing.T) {
 }
 
 func Test_Webhook_when_MissingCloneURL_thenReturn202MissingRepoURL(t *testing.T) {
-	// Given
+	// 准备
 	r := newRouter(newTestDeps(t, queue.New(1, 10)))
 	ev := basePushEvent()
 	proj := ev["project"].(map[string]any)
 	proj["git_ssh_url"] = ""
 	proj["git_http_url"] = ""
 
-	// When
+	// 执行
 	w := doWebhook(r, testSecret, pushBody(t, ev))
 
-	// Then
+	// 断言
 	if w.Code != http.StatusAccepted {
 		t.Errorf("status = %d, want 202", w.Code)
 	}
@@ -218,15 +220,15 @@ func Test_Webhook_when_MissingCloneURL_thenReturn202MissingRepoURL(t *testing.T)
 }
 
 func Test_Webhook_when_BranchNotWhitelisted_thenReturn202BranchFiltered(t *testing.T) {
-	// Given
+	// 准备
 	r := newRouter(newTestDeps(t, queue.New(1, 10)))
 	ev := basePushEvent()
 	ev["ref"] = "refs/heads/feature/x"
 
-	// When
+	// 执行
 	w := doWebhook(r, testSecret, pushBody(t, ev))
 
-	// Then
+	// 断言
 	if w.Code != http.StatusAccepted {
 		t.Errorf("status = %d, want 202", w.Code)
 	}
@@ -236,15 +238,15 @@ func Test_Webhook_when_BranchNotWhitelisted_thenReturn202BranchFiltered(t *testi
 }
 
 func Test_Webhook_when_InvalidCommitSHA_thenReturn202Ignored(t *testing.T) {
-	// Given
+	// 准备
 	r := newRouter(newTestDeps(t, queue.New(1, 10)))
 	ev := basePushEvent()
-	ev["checkout_sha"] = "xyz123" // not a full hex object id
+	ev["checkout_sha"] = "xyz123" // 不是完整的十六进制对象 id
 
-	// When
+	// 执行
 	w := doWebhook(r, testSecret, pushBody(t, ev))
 
-	// Then
+	// 断言
 	if w.Code != http.StatusAccepted {
 		t.Errorf("status = %d, want 202", w.Code)
 	}
@@ -254,14 +256,14 @@ func Test_Webhook_when_InvalidCommitSHA_thenReturn202Ignored(t *testing.T) {
 }
 
 func Test_Webhook_when_ValidPush_thenReturn202QueuedWithDerivedBuild(t *testing.T) {
-	// Given
+	// 准备
 	deps := newTestDeps(t, queue.New(1, 10))
 	r := newRouter(deps)
 
-	// When
+	// 执行
 	w := doWebhook(r, testSecret, pushBody(t, basePushEvent()))
 
-	// Then
+	// 断言
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("status = %d body = %s, want 202", w.Code, w.Body.String())
 	}
@@ -284,8 +286,8 @@ func Test_Webhook_when_ValidPush_thenReturn202QueuedWithDerivedBuild(t *testing.
 	if resp.Image != "app" {
 		t.Errorf("image = %q, want app (derived from repository name)", resp.Image)
 	}
-	if resp.Tag != "aaaaaaaa" {
-		t.Errorf("tag = %q, want first 8 chars of commit sha", resp.Tag)
+	if resp.Tag != "latest" {
+		t.Errorf("tag = %q, want latest (default)", resp.Tag)
 	}
 	b, ok := deps.Store.Get(resp.BuildID)
 	if !ok {
@@ -303,15 +305,15 @@ func Test_Webhook_when_ValidPush_thenReturn202QueuedWithDerivedBuild(t *testing.
 }
 
 func Test_Webhook_when_RedeliveredSameCommit_thenReturn202DuplicateWithoutRebuild(t *testing.T) {
-	// Given: the same event delivered twice while the first build is queued.
+	// 准备：同一事件在首个构建排队期间被投递两次。
 	deps := newTestDeps(t, queue.New(1, 10))
 	r := newRouter(deps)
 
-	// When
+	// 执行
 	first := doWebhook(r, testSecret, pushBody(t, basePushEvent()))
 	second := doWebhook(r, testSecret, pushBody(t, basePushEvent()))
 
-	// Then
+	// 断言
 	if first.Code != http.StatusAccepted {
 		t.Fatalf("first status = %d body = %s, want 202", first.Code, first.Body.String())
 	}
@@ -337,17 +339,17 @@ func Test_Webhook_when_RedeliveredSameCommit_thenReturn202DuplicateWithoutRebuil
 }
 
 func Test_Webhook_when_QueueFull_thenReturn503(t *testing.T) {
-	// Given
+	// 准备
 	q := queue.New(1, 1)
 	if err := q.Enqueue(queue.Job{Repo: testRepo(), Run: func(context.Context) error { return nil }}); err != nil {
 		t.Fatal(err)
 	}
 	r := newRouter(newTestDeps(t, q))
 
-	// When
+	// 执行
 	w := doWebhook(r, testSecret, pushBody(t, basePushEvent()))
 
-	// Then
+	// 断言
 	if w.Code != http.StatusServiceUnavailable {
 		t.Errorf("status = %d, want 503", w.Code)
 	}
@@ -357,15 +359,15 @@ func Test_Webhook_when_QueueFull_thenReturn503(t *testing.T) {
 }
 
 func Test_Webhook_when_BuildTagConfigured_thenResponseUsesConfiguredTag(t *testing.T) {
-	// Given: build.tag replaces the commit-sha tag.
+	// 准备：build.tag 会替换基于 commit sha 的 tag。
 	deps := newTestDeps(t, queue.New(1, 10))
 	deps.Build = config.BuildConfig{Tag: "latest"}
 	r := newRouter(deps)
 
-	// When
+	// 执行
 	w := doWebhook(r, testSecret, pushBody(t, basePushEvent()))
 
-	// Then
+	// 断言
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("status = %d body = %s, want 202", w.Code, w.Body.String())
 	}
@@ -381,15 +383,15 @@ func Test_Webhook_when_BuildTagConfigured_thenResponseUsesConfiguredTag(t *testi
 }
 
 func Test_Webhook_when_BranchTagOverride_thenResponseUsesOverride(t *testing.T) {
-	// Given: a per-branch override beats the global tag.
+	// 准备：按分支的覆盖优先于全局 tag。
 	deps := newTestDeps(t, queue.New(1, 10))
 	deps.Build = config.BuildConfig{BranchTags: map[string]string{"main": "stable"}}
 	r := newRouter(deps)
 
-	// When
+	// 执行
 	w := doWebhook(r, testSecret, pushBody(t, basePushEvent()))
 
-	// Then
+	// 断言
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("status = %d body = %s, want 202", w.Code, w.Body.String())
 	}
@@ -404,8 +406,7 @@ func Test_Webhook_when_BranchTagOverride_thenResponseUsesOverride(t *testing.T) 
 	}
 }
 
-// stubNotifier records notifications synchronously so tests observe them
-// without waiting on goroutines.
+// stubNotifier 同步记录通知，使测试无需等待 goroutine 即可观察到它们。
 type stubNotifier struct {
 	mu   sync.Mutex
 	msgs []notify.Message
@@ -431,14 +432,14 @@ func (s *stubNotifier) messages() []notify.Message {
 }
 
 func Test_Webhook_when_Queued_thenRecordsActorAndCommitSubject(t *testing.T) {
-	// Given
+	// 准备
 	deps := newTestDeps(t, queue.New(1, 10))
 	r := newRouter(deps)
 
-	// When
+	// 执行
 	w := doWebhook(r, testSecret, pushBody(t, basePushEvent()))
 
-	// Then
+	// 断言
 	var resp struct {
 		BuildID string `json:"build_id"`
 	}
@@ -458,7 +459,7 @@ func Test_Webhook_when_Queued_thenRecordsActorAndCommitSubject(t *testing.T) {
 }
 
 func Test_Webhook_when_QueueFull_thenNotifiesFailure(t *testing.T) {
-	// Given: the queue is already full, so the build fails before running.
+	// 准备：队列已满，因此构建在运行前就失败。
 	q := queue.New(1, 1)
 	if err := q.Enqueue(queue.Job{Repo: testRepo(), Run: func(context.Context) error { return nil }}); err != nil {
 		t.Fatal(err)
@@ -468,10 +469,10 @@ func Test_Webhook_when_QueueFull_thenNotifiesFailure(t *testing.T) {
 	deps.Notify = stub
 	r := newRouter(deps)
 
-	// When
+	// 执行
 	w := doWebhook(r, testSecret, pushBody(t, basePushEvent()))
 
-	// Then
+	// 断言
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503", w.Code)
 	}
@@ -491,7 +492,7 @@ func Test_Webhook_when_QueueFull_thenNotifiesFailure(t *testing.T) {
 }
 
 func Test_notifyEvent_when_Success_thenMessageCarriesBuildData(t *testing.T) {
-	// Given
+	// 准备
 	deps := newTestDeps(t, queue.New(1, 10))
 	stub := &stubNotifier{}
 	deps.Notify = stub
@@ -508,10 +509,10 @@ func Test_notifyEvent_when_Success_thenMessageCarriesBuildData(t *testing.T) {
 		bb.FinishedAt = start.Add(2 * time.Second)
 	})
 
-	// When
-	notifyEvent(deps, b.ID, notify.EventSuccess, "", "compose down")
+	// 执行
+	notifyEvent(deps, b.ID, notify.EventSuccess, "")
 
-	// Then
+	// 断言
 	msgs := stub.messages()
 	if len(msgs) != 1 {
 		t.Fatalf("notifications = %d, want 1", len(msgs))
@@ -526,21 +527,18 @@ func Test_notifyEvent_when_Success_thenMessageCarriesBuildData(t *testing.T) {
 	if m.Duration != 2*time.Second {
 		t.Errorf("Duration = %v, want 2s (finished - started)", m.Duration)
 	}
-	if m.DeployErr != "compose down" {
-		t.Errorf("DeployErr = %q, want compose down", m.DeployErr)
-	}
 }
 
 func Test_notifyEvent_when_DeliveryFails_thenNotifyErrorRecorded(t *testing.T) {
-	// Given
+	// 准备
 	deps := newTestDeps(t, queue.New(1, 10))
 	deps.Notify = &stubNotifier{err: errors.New("bad gateway")}
 	b := deps.Store.Create(store.Build{Repo: "app", Status: store.StatusFailed})
 
-	// When
-	notifyEvent(deps, b.ID, notify.EventFailure, "boom", "")
+	// 执行
+	notifyEvent(deps, b.ID, notify.EventFailure, "boom")
 
-	// Then
+	// 断言
 	got, ok := deps.Store.Get(b.ID)
 	if !ok {
 		t.Fatal("build not in store")
@@ -554,10 +552,273 @@ func Test_notifyEvent_when_DeliveryFails_thenNotifyErrorRecorded(t *testing.T) {
 }
 
 func Test_notifyEvent_when_NilNotifier_thenSafe(t *testing.T) {
-	// Given
+	// 准备
 	deps := newTestDeps(t, queue.New(1, 10))
 	b := deps.Store.Create(store.Build{Repo: "app"})
 
-	// When / Then: must not panic with notifications unconfigured.
-	notifyEvent(deps, b.ID, notify.EventStarted, "", "")
+	// 执行 / 断言：在未配置通知时不得 panic。
+	notifyEvent(deps, b.ID, notify.EventStarted, "")
+}
+
+// stubDeploy 为单个测试替换部署接缝。
+func stubDeploy(t *testing.T, up func(context.Context, deploy.Request) error, ps func(context.Context, deploy.Request) (string, error)) {
+	t.Helper()
+	oldUp, oldPs := deployUp, deployPs
+	deployUp, deployPs = up, ps
+	t.Cleanup(func() { deployUp, deployPs = oldUp, oldPs })
+}
+
+func deployDeps(t *testing.T, cfg config.DeployConfig) (Deps, *store.Build, *bytes.Buffer) {
+	t.Helper()
+	deps := newTestDeps(t, queue.New(1, 10))
+	deps.Deploy = cfg
+	b := deps.Store.Create(store.Build{Repo: "app", Status: store.StatusSuccess})
+	return deps, &b, &bytes.Buffer{}
+}
+
+func appTarget() config.DeployTarget {
+	return config.DeployTarget{
+		Dir:         "/data/services/app",
+		ComposeFile: "docker-compose.yaml",
+		Service:     "api",
+	}
+}
+
+func Test_deployAfterBuild_when_Disabled_thenSkipped(t *testing.T) {
+	// 准备
+	deps, b, log := deployDeps(t, config.DeployConfig{})
+
+	// 执行
+	deployAfterBuild(context.Background(), deps, b.ID, "app", log)
+
+	// 断言
+	got, _ := deps.Store.Get(b.ID)
+	if got.DeployStatus != notify.DeploySkipped {
+		t.Errorf("DeployStatus = %q, want skipped", got.DeployStatus)
+	}
+	if got.DeployReason != "deploy not enabled" {
+		t.Errorf("DeployReason = %q", got.DeployReason)
+	}
+	if got.Status != store.StatusSuccess {
+		t.Errorf("Status = %q, deploy must not change the build", got.Status)
+	}
+	if !strings.Contains(log.String(), "deploy skipped: deploy not enabled") {
+		t.Errorf("log = %q", log.String())
+	}
+}
+
+func Test_deployAfterBuild_when_NoTarget_thenSkippedWithRepoName(t *testing.T) {
+	// 准备：存在一个部署目标，但对应的是另一个仓库名。
+	deps, b, log := deployDeps(t, config.DeployConfig{
+		Enabled: true,
+		Targets: map[string]config.DeployTarget{"other": appTarget()},
+	})
+	stubDeploy(t, func(context.Context, deploy.Request) error {
+		t.Fatal("deploy must not run without a matching target")
+		return nil
+	}, nil)
+
+	// 执行
+	deployAfterBuild(context.Background(), deps, b.ID, "app", log)
+
+	// 断言
+	got, _ := deps.Store.Get(b.ID)
+	if got.DeployStatus != notify.DeploySkipped {
+		t.Errorf("DeployStatus = %q, want skipped", got.DeployStatus)
+	}
+	if got.DeployReason != "no target for app" {
+		t.Errorf("DeployReason = %q, want no target for app", got.DeployReason)
+	}
+	if !strings.Contains(log.String(), "deploy skipped: no target for app") {
+		t.Errorf("log = %q", log.String())
+	}
+}
+
+func Test_deployAfterBuild_when_TargetMatchesCaseInsensitive_thenDeployed(t *testing.T) {
+	// 准备：YAML 中的 key 与仓库名大小写不同。
+	deps, b, log := deployDeps(t, config.DeployConfig{
+		Enabled: true,
+		Targets: map[string]config.DeployTarget{"APP": appTarget()},
+	})
+	var seen deploy.Request
+	stubDeploy(t, func(_ context.Context, req deploy.Request) error {
+		seen = req
+		return nil
+	}, nil)
+
+	// 执行
+	deployAfterBuild(context.Background(), deps, b.ID, "app", log)
+
+	// 断言
+	got, _ := deps.Store.Get(b.ID)
+	if got.DeployStatus != notify.DeployDeployed || !got.Deployed {
+		t.Errorf("build = %+v, want deployed", got)
+	}
+	if got.Status != store.StatusSuccess {
+		t.Errorf("Status = %q, want success", got.Status)
+	}
+	if got.DeployTarget != filepath.Join("/data/services/app", "docker-compose.yaml") {
+		t.Errorf("DeployTarget = %q", got.DeployTarget)
+	}
+	if seen.Target.Service != "api" || seen.Target.Dir != "/data/services/app" {
+		t.Errorf("deploy request = %+v, want the configured target", seen)
+	}
+	if seen.Timeout != 5*time.Minute {
+		t.Errorf("Timeout = %v, want the 5m default", seen.Timeout)
+	}
+}
+
+func Test_deployAfterBuild_when_UpFails_thenBuildStaysSuccessAndPsCollected(t *testing.T) {
+	// 准备
+	deps, b, log := deployDeps(t, config.DeployConfig{
+		Enabled: true,
+		Targets: map[string]config.DeployTarget{"app": appTarget()},
+	})
+	stubDeploy(t,
+		func(context.Context, deploy.Request) error { return errors.New("compose up exploded") },
+		func(context.Context, deploy.Request) (string, error) {
+			return "NAME  STATUS\napi   Exited (1)", nil
+		},
+	)
+
+	// 执行
+	deployAfterBuild(context.Background(), deps, b.ID, "app", log)
+
+	// 断言
+	got, _ := deps.Store.Get(b.ID)
+	if got.Status != store.StatusSuccess {
+		t.Errorf("Status = %q, a failed deploy must keep the build successful", got.Status)
+	}
+	if got.Deployed {
+		t.Error("Deployed = true, want false")
+	}
+	if got.DeployStatus != notify.DeployFailed {
+		t.Errorf("DeployStatus = %q, want failed", got.DeployStatus)
+	}
+	if !strings.Contains(got.DeployError, "compose up exploded") {
+		t.Errorf("DeployError = %q", got.DeployError)
+	}
+	if !strings.Contains(got.DeployOutput, "Exited (1)") {
+		t.Errorf("DeployOutput = %q, want the compose ps output", got.DeployOutput)
+	}
+	if !strings.Contains(log.String(), "deploy failed") {
+		t.Errorf("log = %q, want the failure line", log.String())
+	}
+}
+
+func Test_deployAfterBuild_when_PsFails_thenReasonIncluded(t *testing.T) {
+	// 准备：compose ps 同样失败；其原因仍须呈现在卡片上。
+	deps, b, log := deployDeps(t, config.DeployConfig{
+		Enabled: true,
+		Targets: map[string]config.DeployTarget{"app": appTarget()},
+	})
+	stubDeploy(t,
+		func(context.Context, deploy.Request) error { return errors.New("up failed") },
+		func(context.Context, deploy.Request) (string, error) { return "", errors.New("no such service") },
+	)
+
+	// 执行
+	deployAfterBuild(context.Background(), deps, b.ID, "app", log)
+
+	// 断言
+	got, _ := deps.Store.Get(b.ID)
+	if !strings.Contains(got.DeployOutput, "compose ps error: no such service") {
+		t.Errorf("DeployOutput = %q, want the ps error", got.DeployOutput)
+	}
+}
+
+func Test_deployAfterBuild_when_MissingDir_thenFailedWithoutPanic(t *testing.T) {
+	// 准备：对不存在的目录真实调用 deploy.Up。
+	deps, b, log := deployDeps(t, config.DeployConfig{
+		Enabled: true,
+		Targets: map[string]config.DeployTarget{"app": {
+			Dir:         filepath.Join(t.TempDir(), "missing"),
+			ComposeFile: "docker-compose.yaml",
+		}},
+	})
+
+	// 执行
+	deployAfterBuild(context.Background(), deps, b.ID, "app", log)
+
+	// 断言
+	got, _ := deps.Store.Get(b.ID)
+	if got.DeployStatus != notify.DeployFailed {
+		t.Errorf("DeployStatus = %q, want failed", got.DeployStatus)
+	}
+	if !strings.Contains(got.DeployError, "does not exist") {
+		t.Errorf("DeployError = %q, want the missing dir reason", got.DeployError)
+	}
+	if got.Status != store.StatusSuccess {
+		t.Errorf("Status = %q, want success", got.Status)
+	}
+}
+
+func Test_notifyEvent_when_DeployFailed_thenSuccessMessageCarriesDeployData(t *testing.T) {
+	// 准备
+	deps := newTestDeps(t, queue.New(1, 10))
+	stub := &stubNotifier{}
+	deps.Notify = stub
+	b := deps.Store.Create(store.Build{Repo: "app"})
+	deps.Store.Update(b.ID, func(bb *store.Build) {
+		bb.Status = store.StatusSuccess
+		bb.Tag = "latest"
+		bb.DeployStatus = notify.DeployFailed
+		bb.DeployError = "compose up exploded"
+		bb.DeployOutput = "NAME  STATUS\napi   Exited (1)"
+		bb.DeployTarget = "/data/services/app/docker-compose.yaml"
+	})
+
+	// 执行
+	notifyEvent(deps, b.ID, notify.EventSuccess, "")
+
+	// 断言
+	msgs := stub.messages()
+	if len(msgs) != 1 {
+		t.Fatalf("notifications = %d, want 1", len(msgs))
+	}
+	m := msgs[0]
+	if m.Event != notify.EventSuccess {
+		t.Errorf("Event = %q, want success (the build succeeded)", m.Event)
+	}
+	if m.DeployStatus != notify.DeployFailed {
+		t.Errorf("DeployStatus = %q, want failed", m.DeployStatus)
+	}
+	if m.Image != "app:latest" {
+		t.Errorf("Image = %q, want app:latest", m.Image)
+	}
+	if m.DeployOutput == "" || m.DeployError == "" {
+		t.Errorf("msg = %+v, want deploy error and output", m)
+	}
+}
+
+func Test_notifyEvent_when_Failure_thenIncludesLogTail(t *testing.T) {
+	// 准备
+	deps := newTestDeps(t, queue.New(1, 10))
+	stub := &stubNotifier{}
+	deps.Notify = stub
+	b := deps.Store.Create(store.Build{Repo: "app", Status: store.StatusFailed})
+	f, err := deps.Store.OpenLog(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 40; i++ {
+		_, _ = f.WriteString("log line\n")
+	}
+	_, _ = f.WriteString("the real error\n")
+	_ = f.Close()
+
+	// 执行
+	notifyEvent(deps, b.ID, notify.EventFailure, "build failed")
+
+	// 断言
+	msgs := stub.messages()
+	if len(msgs) != 1 {
+		t.Fatalf("notifications = %d, want 1", len(msgs))
+	}
+	if !strings.Contains(msgs[0].LogTail, "the real error") {
+		t.Errorf("LogTail = %q, want the last lines", msgs[0].LogTail)
+	}
+	if lines := strings.Count(msgs[0].LogTail, "\n") + 1; lines > 30 {
+		t.Errorf("LogTail lines = %d, want <= 30", lines)
+	}
 }

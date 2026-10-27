@@ -45,13 +45,13 @@ func get(t *testing.T, s *Server, path string) *httptest.ResponseRecorder {
 }
 
 func Test_Healthz_when_Called_thenReturn200OK(t *testing.T) {
-	// Given
+	// 准备
 	s, _ := newTestServer(t)
 
-	// When
+	// 执行
 	w := get(t, s, "/healthz")
 
-	// Then
+	// 断言
 	if w.Code != http.StatusOK {
 		t.Errorf("status = %d, want 200", w.Code)
 	}
@@ -61,13 +61,13 @@ func Test_Healthz_when_Called_thenReturn200OK(t *testing.T) {
 }
 
 func Test_ListBuilds_when_Empty_thenReturnEmptyArray(t *testing.T) {
-	// Given
+	// 准备
 	s, _ := newTestServer(t)
 
-	// When
+	// 执行
 	w := get(t, s, "/api/builds")
 
-	// Then
+	// 断言
 	if w.Code != http.StatusOK {
 		t.Errorf("status = %d, want 200", w.Code)
 	}
@@ -77,27 +77,27 @@ func Test_ListBuilds_when_Empty_thenReturnEmptyArray(t *testing.T) {
 }
 
 func Test_GetBuild_when_UnknownID_thenReturn404(t *testing.T) {
-	// Given
+	// 准备
 	s, _ := newTestServer(t)
 
-	// When
+	// 执行
 	w := get(t, s, "/api/builds/bogus")
 
-	// Then
+	// 断言
 	if w.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", w.Code)
 	}
 }
 
 func Test_GetBuild_when_KnownID_thenReturnBuildJSON(t *testing.T) {
-	// Given
+	// 准备
 	s, st := newTestServer(t)
 	created := st.Create(store.Build{Repo: "app", Branch: "main", SHA: "abc", Status: store.StatusQueued})
 
-	// When
+	// 执行
 	w := get(t, s, "/api/builds/"+created.ID)
 
-	// Then
+	// 断言
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
 	}
@@ -111,20 +111,20 @@ func Test_GetBuild_when_KnownID_thenReturnBuildJSON(t *testing.T) {
 }
 
 func Test_BuildLog_when_UnknownID_thenReturn404(t *testing.T) {
-	// Given
+	// 准备
 	s, _ := newTestServer(t)
 
-	// When
+	// 执行
 	w := get(t, s, "/api/builds/bogus/log")
 
-	// Then
+	// 断言
 	if w.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", w.Code)
 	}
 }
 
 func Test_BuildLog_when_Written_thenReturnContent(t *testing.T) {
-	// Given
+	// 准备
 	s, st := newTestServer(t)
 	created := st.Create(store.Build{Repo: "app"})
 	f, err := st.OpenLog(created.ID)
@@ -136,10 +136,10 @@ func Test_BuildLog_when_Written_thenReturnContent(t *testing.T) {
 	}
 	f.Close()
 
-	// When
+	// 执行
 	w := get(t, s, "/api/builds/"+created.ID+"/log")
 
-	// Then
+	// 断言
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
 	}

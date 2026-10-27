@@ -8,17 +8,15 @@ import (
 	"gitlab-builder/internal/templates"
 )
 
-// resolveDockerfile picks the build recipe for a cloned repository:
+// resolveDockerfile 为已克隆的仓库选择构建配方：
 //
-//  1. the repository's own Dockerfile at the repo root, when present;
-//  2. otherwise a built-in language template (Go / Node / Vue / Java / Gradle)
-//     selected from the repo's marker files, materialised at the repo root so
-//     the build context stays uniform. Templates that delegate to a build
-//     script also get that script written to templates.ScriptPath.
+//  1. 仓库根目录下自带的 Dockerfile（若存在）；
+//  2. 否则使用内置语言模板（Go / Node / Vue / Java / Gradle），由仓库中的标记文件选出，
+//     并写到仓库根目录，以保持构建上下文统一。委托给构建脚本的模板还会把该脚本写入
+//     templates.ScriptPath。
 //
-// The returned source describes the choice for the build log ("repository" or
-// "template:<name>"). A repo with neither its own Dockerfile nor a recognised
-// language marker fails explicitly instead of guessing.
+// 返回的 source 描述本次选择，用于构建日志（"repository" 或 "template:<name>"）。
+// 既没有自带 Dockerfile、也没有可识别语言标记的仓库会明确报错，而不是靠猜测。
 func resolveDockerfile(repoDir string) (path, source string, err error) {
 	p := filepath.Join(repoDir, "Dockerfile")
 	if st, statErr := os.Stat(p); statErr == nil && !st.IsDir() {

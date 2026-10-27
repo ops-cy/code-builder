@@ -9,21 +9,20 @@ import (
 	"gitlab-builder/internal/config"
 )
 
-// Reasons returned by deriveRepository when an event is rejected before a
-// build can be derived from it.
+// deriveRepository 在事件被拒绝、无法据此推导构建时返回的原因。
 const (
-	reasonMissingURL = "missing_repo_url"
-	reasonHostDenied = "host_not_allowed"
+	reasonMissingURL  = "missing_repo_url"
+	reasonHostDenied  = "host_not_allowed"
+	reasonInvalidName = "invalid_repo_name"
 )
 
-// deriveRepository builds the runtime Repository for a push event entirely
-// from the validated event payload plus global policy: clone URL and project
-// name come from GitLab. The configured domain is the only access gate — the
-// clone URL is untrusted input, so a leaked webhook secret must not be able
-// to point the service's deploy key at an arbitrary SSH server.
+// deriveRepository 完全依据经过校验的事件负载加上全局策略，为 push 事件构造
+// 运行时 Repository：clone URL 和项目名都来自 GitLab。配置的域名是唯一的
+// 访问关卡 —— clone URL 属于不可信输入，因此即使 webhook 密钥泄露，也不能
+// 让服务的部署密钥指向任意的 SSH 服务器。
 //
-// Returns repo with reason == "", or a zero Repository with a
-// machine-readable reason for the 202 response.
+// 成功时返回 reason == "" 的 repo；否则返回零值 Repository 以及供 202
+// 响应的机器可读 reason。
 func deriveRepository(domain string, imgs *imageRegistry, ev PushEvent) (config.Repository, string) {
 	url := ev.Project.GitSSHURL
 	if url == "" {
@@ -37,14 +36,11 @@ func deriveRepository(domain string, imgs *imageRegistry, ev PushEvent) (config.
 	}
 
 	key := normalizeGitURL(url)
-	rawName := ev.Project.Name
-	if rawName == "" {
-		rawName = repoNameFromURL(url)
-	}
-	name := normalizeDockerName(rawName)
+	// 仓库名取自 URL 的最后一段路径（转为小写并做净化处理），
+	// 同时用作镜像名和部署目标 key。
+	name := normalizeDockerName(repoNameFromURL(url))
 	if name == "" {
-		// Unconvertible name (e.g. all CJK/punctuation): stable unique id.
-		name = "repo-" + hash8(key)
+		return config.Repository{}, reasonInvalidName
 	}
 	return config.Repository{
 		Key:   key,
@@ -54,23 +50,9 @@ func deriveRepository(domain string, imgs *imageRegistry, ev PushEvent) (config.
 	}, ""
 }
 
-// repoNameFromURL extracts the final path segment of the clone URL without
-// the ".git" suffix, as a fallback when the event carries no project name.
-func repoNameFromURL(url string) string {
-	n := normalizeGitURL(url) // host[:port]/path
-	if i := strings.IndexByte(n, '/'); i >= 0 {
-		n = n[i+1:]
-	}
-	if i := strings.LastIndexByte(n, '/'); i >= 0 {
-		n = n[i+1:]
-	}
-	return strings.TrimSuffix(n, ".git")
-}
-
-// normalizeDockerName lowercases and reduces s to characters Docker accepts
-// in a single repository-name component ([a-z0-9._-], no repeated or edge
-// separators). Lossy conversions may collide across repositories; callers
-// resolve those collisions via imageRegistry.
+// normalizeDockerName 将 s 转为小写，并只保留 Docker 单个仓库名组件允许的
+// 字符（[a-z0-9._-]，不出现重复或首尾分隔符）。有损转换可能让不同仓库发生
+// 冲突；调用方通过 imageRegistry 解决这些冲突。
 func normalizeDockerName(s string) string {
 	var b strings.Builder
 	lastSep := false
@@ -83,7 +65,7 @@ func normalizeDockerName(s string) string {
 			lastSep = false
 		case isSep:
 			if lastSep {
-				continue // collapse separator runs to one char
+				continue // 连续的分隔符折叠为一个字符
 			}
 			b.WriteRune(r)
 			lastSep = true
@@ -98,27 +80,26 @@ func normalizeDockerName(s string) string {
 	return strings.Trim(b.String(), "._-")
 }
 
-// hash8 returns the first 8 hex chars of the SHA-256 of s: a short stable
-// identifier used for name fallbacks and collision suffixes.
+// hash8 返回 s 的 SHA-256 前 8 个十六进制字符：用于名称回退和冲突后缀的
+// 短小且稳定的标识符。
 func hash8(s string) string {
 	sum := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(sum[:])[:8]
 }
 
-// imageRegistry hands out image names without letting two different
-// repositories silently share one. The first repository to claim a name owns
-// it; a later repository claiming the same name receives a stable
-// URL-derived suffix instead of an error, so redeliveries stay deterministic.
+// imageRegistry 负责分配镜像名，避免两个不同的仓库在无提示的情况下共用同一个。
+// 先占用某个名字的仓库拥有它；后占用同一名字的仓库会得到一个由 URL 推导的
+// 稳定后缀（而不是报错），因此重复投递的结果保持确定性。
 type imageRegistry struct {
 	mu      sync.Mutex
-	byImage map[string]string // image name -> repository key
+	byImage map[string]string // 镜像名 -> 仓库 key
 }
 
 func newImageRegistry() *imageRegistry {
 	return &imageRegistry{byImage: make(map[string]string)}
 }
 
-// resolve returns the image name for repoKey, disambiguating conflicts.
+// resolve 返回 repoKey 对应的镜像名，并消除冲突。
 func (r *imageRegistry) resolve(image, repoKey string) string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -131,11 +112,11 @@ func (r *imageRegistry) resolve(image, repoKey string) string {
 	return image
 }
 
-// dedup suppresses duplicate webhook deliveries for a repository commit that
-// is already queued or running.
+// dedup 用于抑制重复的 webhook 投递：某个仓库的同一 commit 已在队列中或
+// 正在运行时，不再重复处理。
 type dedup struct {
 	mu sync.Mutex
-	m  map[string]string // "<repoKey>@<sha>" -> buildID
+	m  map[string]string // "<repoKey>@<sha>" 映射到 buildID
 }
 
 func newDedup() *dedup {
@@ -155,8 +136,8 @@ func (d *dedup) put(k, buildID string) {
 	d.m[k] = buildID
 }
 
-// release drops the key only if buildID still owns it, so a newer build for
-// the same commit is never unregistered by a stale run finishing late.
+// release 仅在 buildID 仍持有该 key 时才删除它，这样同一 commit 的较新构建
+// 不会被迟到的旧运行注销。
 func (d *dedup) release(k, buildID string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()

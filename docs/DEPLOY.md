@@ -11,25 +11,15 @@
 
 ```
 gitlab-builder/
-├── docker-compose.yml        # 服务编排（挂载 docker.sock 与 /data/services）
-├── Dockerfile                # 服务镜像（内含 git / openssh-client / docker-cli / docker-cli-compose）
+├── docker-compose.yml        # 服务编排（挂载 docker.sock、配置、secrets、工作区、日志与服务目录）
+├── Dockerfile                # 服务镜像（内含 git / openssh-client / docker-cli / compose 插件）
 ├── config/
-│   └── config.yaml           # 服务配置（只读挂载进容器，server + code，可选 build/registry/deploy）
+│   └── config.yaml           # 服务配置（只读挂载；server + code，可选 timeouts/build/registry/deploy/notify）
 ├── secrets/                  # SSH Deploy Key 私钥目录（只读挂载，需自建）
 │   └── gitlab_deploy_key     # 一把全局只读 key，添加到所有被构建项目
 |—— data/                      # clone 工作区（构建后自动清理）
-└── logs      → /app/logs        # 构建日志 <build_id>.log
-```
-
-自动发布（可选）时，宿主机另需服务目录，且必须以**相同路径**挂载进容器：
-
-```
-/data/services/                 # deploy.services_dir（宿主机与容器内路径一致）
-├── atlas-market/
-│   └── docker-compose.yaml     # 服务名 = 目录名 = 镜像名；compose 内写 image: atlas-market:latest
-├── ex-backend/
-│   └── docker-compose.yaml
-└── ...
+├── logs      → /app/logs        # 构建日志 <build_id>.log
+└── /data/services/           # 宿主机服务目录（可选自动部署），同路径只读挂载进容器
 ```
 
 ## 部署步骤
@@ -60,6 +50,8 @@ export GITLAB_DEPLOY_KEY_PATH="/run/secrets/gitlab_deploy_key"
 | `GITLAB_WEBHOOK_SECRET` | 是 | Webhook Secret；未设置时启动失败（config.yaml 中 `${...}` 无法展开） |
 | `GITLAB_DEPLOY_KEY_PATH` | 否 | 全局 Deploy Key 私钥路径；设置但不可访问则启动失败 |
 | `REGISTRY_PASSWORD` | 否 | 供 `registry.password` 以 `${REGISTRY_PASSWORD}` 引用；仅启用推送时需要 |
+| `LARK_WEBHOOK_URL` | 否 | 飞书机器人地址；`notify.lark.webhook_url` 为空时使用（仍需 `notify.enabled: true`） |
+| `LARK_SECRET` | 否 | 飞书签名校验密钥；`notify.lark.secret` 为空时使用 |
 | `LOG_LEVEL` | 否 | `debug` / `info`（默认）/ `warn` / `error` |
 
 ### 3. 编辑配置
@@ -70,25 +62,13 @@ export GITLAB_DEPLOY_KEY_PATH="/run/secrets/gitlab_deploy_key"
 - `code.webhook_secret`：保持 `${GITLAB_WEBHOOK_SECRET}` 占位符
 - `code.domain` **必填**：仓库所在的 GitLab 域名（如 `code.zmatrix.cn`），事件仓库地址域名必须与它**精确相等**才准入
 - `code.branches`：触发分支白名单（精确匹配，默认 `["main", "master"]`）
-- `build`（**可选**）：省略时标签取 Commit SHA 前 8 位；`build.tag` 设全局固定标签，`build.branch_tags`（精确匹配分支）覆盖之，例 `{main: stable, pre: latest}`
+- `timeouts`（**可选**）：`clone` / `build` / `job` / `deploy` 各步骤超时，默认 `15m` / `25m` / `30m` / `5m`
+- `build`（**可选**）：省略时标签为 `latest`；`build.tag` 设全局固定标签，`build.branch_tags`（精确匹配分支）覆盖之，例 `{main: stable, pre: latest}`
 - `registry`（**可选**）：不写或 `url` 留空 = **仅本地构建**（默认）；填 `url` 才启用推送，`project` 为可选镜像名前缀，`username`/`password` 成对出现（都填则推送前 `docker login`，建议密码用 `${REGISTRY_PASSWORD}` 注入）
-- `deploy`（**可选**）：`enabled: true` 开启自动发布；仅当构建产出的标签等于 `deploy.tag`（默认 `latest`）时才执行 `docker compose up -d`。`services_dir`（默认 `/data/services`，需同路径挂载）、`compose_file`（默认 `docker-compose.yaml`）、`project_name`（留空=服务目录名）、`wait`/`wait_timeout`（默认 `false`/`120s`）
-- `notify`（**可选**）：`enabled: true` 且填写 `lark.webhook_url` 后推送飞书卡片；`on_started`/`on_success`/`on_failure` 默认全开，`lark.secret` 仅在机器人开启签名校验时填写，`lark.timeout` 默认 `10s`
+- `deploy`（**可选**）：`enabled: true` 且 `targets` 中命中 `repo_name` 时，构建成功后执行 `docker compose up -d`（见下节）
+- `notify`（**可选**）：`enabled: true` 且填写 `lark.webhook_url`（或设置 `LARK_WEBHOOK_URL`）后推送飞书卡片；`on_started`/`on_success`/`on_failure` 默认全开，`lark.secret` 仅在机器人开启签名校验时填写，`lark.timeout` 默认 `10s`
 
 配置文件**不包含**仓库列表、模板、分支正则等字段——任何授权域名下的项目挂上 Webhook 即接入。
-
-### 自动发布（可选）
-
-约定：`<services_dir>/<服务名>/<compose 文件>`，其中**目录名 = 镜像名 = compose 服务名**，compose 内以 `image: <服务名>:<tag>` 引用刚构建出的本地镜像（不要用 `build:`）。当仓库 `Backend-API`（镜像名 `backend-api`）产出 `latest` 标签时，服务执行：
-
-```bash
-docker compose -f /data/services/backend-api/docker-compose.yaml -p backend-api up -d backend-api
-```
-
-- 工作目录设为该服务目录，因此 compose 的 `.env` / `env_file` / 相对 bind mount 都能正确解析——**前提是宿主机 `/data/services` 以相同路径挂载进容器**（见 `docker-compose.yml`）。
-- compose 文件名默认 `docker-compose.yaml`；若不存在会自动尝试 `docker-compose.yml` → `compose.yaml` → `compose.yml`，备份文件（如 `ow-bak-docker-compose.yaml`）**永不**被使用。
-- 发布**不 pull**：直接使用本次构建出的本地 `:latest`，因此镜像名/标签必须与 compose 内 `image:` 一致。
-- 发布失败**不影响**构建结果：构建仍为成功，错误写入 `deploy_err`，可在 `/api/builds/:id` 查看；构建日志中亦有 `==> deploy command: ...` 一行。
 
 ### 流水线通知（可选）
 
@@ -98,7 +78,7 @@ docker compose -f /data/services/backend-api/docker-compose.yaml -p backend-api 
 notify:
   enabled: true
   on_started: true    # 🚀 流水线开始
-  on_success: true    # ✅ 流水线成功（部署失败时追加“⚠️ 部署失败”）
+  on_success: true    # ✅ 流水线成功
   on_failure: true    # ❌ 流水线失败
   lark:
     webhook_url: "https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxxxx"
@@ -110,19 +90,51 @@ notify:
 
 | 字段 | 取值 |
 |---|---|
-| 标题 | `{🚀/✅/❌} 流水线{开始/成功/失败} · <镜像名>`，头部颜色 blue/green/red |
-| 项目名称 | 镜像名（仓库名） |
+| 标题 | `{🚀/✅/❌} 流水线{开始/成功/失败} · <repo_name>`；部署失败时为 `⚠️ 构建成功，部署失败 · <repo_name>`（orange） |
+| 项目名称 | `repo_name`（仓库 URL 末尾） |
 | 构建发起 | Webhook 事件的 `user_name`（缺省回退 commit 作者） |
 | 当前版本 | `<分支>-<commit 短 SHA>`，如 `develop-d8f8dddf` |
 | 持续时间 | 构建耗时，如 `3 min 46 sec` |
+| 镜像 | `<repo_name>:<tag>` |
 | 💬 提交摘要 | 推送 commit 的首行信息 |
-| 错误摘要 | 仅失败时出现（折叠面板），最多 2000 字，超出显示“…（已截断）” |
+| 错误摘要 | 仅失败时出现（折叠面板，含日志末尾 30 行），最多 2000 字，超出显示“…（已截断）” |
+| 🚢 部署 | 成功卡片上展示：已部署目标 / 未部署原因 / 部署失败详情（含 `docker compose ps` 输出） |
 | 推送时间 | 发送时刻（Asia/Shanghai） |
 
+- 成功卡片三态：已部署与未部署都是 `✅ 流水线成功`（未部署注明原因）；部署失败是 `⚠️ 构建成功，部署失败`，但构建状态仍为 success。
 - 通知**不阻塞**构建、**不影响**构建结果：投递失败只记录 `NotifyError` 与 WARN 日志，构建状态不变。
 - 投递失败会自动重试（网络错误 / 5xx / 429，最多 3 次）；4xx 不重试。
 - Webhook 地址含 token，属敏感信息：错误与日志中会被脱敏为 `.../hook/****`。
-- `notify.enabled: true` 时 `lark.webhook_url` 必填且必须是 `https://`；三个事件开关不能全部为 `false`（启动时校验）。
+- `notify.enabled: true` 时 `lark.webhook_url`（或 `LARK_WEBHOOK_URL`）必填且必须是 `https://`；三个事件开关不能全部为 `false`（启动时校验）。
+
+### 自动部署（可选）
+
+按 `repo_name`（仓库 URL 最后一个 `/` 与 `.git` 之间的值，转小写）匹配 `deploy.targets`：
+
+```yaml
+deploy:
+  enabled: true
+  targets:
+    atlas-market:
+      dir: "/data/services/atlas-market"    # 容器内绝对路径
+      compose_file: "docker-compose.yaml"   # 仅文件名，位于 dir 内
+      service: ""                           # 留空 = 启动整个文件
+```
+
+构建成功后执行（参数数组直接交给 docker，不经过 shell）：
+
+```bash
+docker compose -f <dir>/<compose_file> up -d [service]
+```
+
+约定与注意事项：
+
+- **不 pull**：compose 文件里的 `image:` 必须指向刚构建出的本地镜像（如 `atlas-market:latest`），否则可能继续运行旧镜像。
+- **同路径挂载**：`docker-compose.yml` 已挂载 `/data/services:/data/services:ro`；`dir` 必须是容器内绝对路径，且宿主机同一路径可访问，compose 才能正确解析 `.env` / `env_file` / bind mount。
+- **tag 不参与判断**：target 里的 `tag` 字段仅为兼容保留，部署只看 `repo_name`。
+- 未开启 / 未命中时日志分别为 `deploy skipped: deploy not enabled` / `deploy skipped: no target for <repo_name>`。
+- 目录不存在、compose 文件缺失或 `up` 失败都记为部署失败，并自动执行 `docker compose ps` 收集输出；构建仍为 success。
+- 同一 compose 文件的操作在进程内串行，避免并发 `up` 互相覆盖。
 
 ### 4. 启动
 
@@ -176,7 +188,13 @@ docker image prune
 
 工作区 `/app/workspace` 中的临时 clone 在每次构建结束后自动删除，无需手工清理。
 
-配置了 `registry.url` 后，成功构建的镜像除本地 tag 外还会被打上远程 tag 并推送到镜像仓库；可用 `docker manifest inspect <url>/<project>/<image>:<sha8>` 或在仓库界面核对。
+配置了 `registry.url` 后，成功构建的镜像除本地 tag 外还会被打上远程 tag 并推送到镜像仓库；可用 `docker manifest inspect <url>/<project>/<image>:<tag>` 或在仓库界面核对（tag 默认 `latest`，可由 `build` 段覆盖）。
+
+配置了自动部署后，可用以下命令确认服务状态：
+
+```bash
+docker compose -f /data/services/<repo_name>/docker-compose.yaml ps
+```
 
 ## 排障
 
@@ -197,10 +215,9 @@ docker image prune
 | 构建失败：`docker push ... failed` | 网络不通、仓库未创建对应命名空间/项目、或凭据无推送权限；本地镜像仍保留（`docker images` 可见），修复后重发即可 |
 | 构建成功但仓库里没有镜像 | 未配置 `registry.url`（此时按设计只本地构建）；或推送地址与预期命名空间不符，检查日志中 `==> registry push enabled remote=...` 一行 |
 | 构建失败：`docker daemon not reachable` | 容器内未挂载 docker.sock 或宿主机无 Docker；检查 `docker-compose.yml` 卷挂载 |
-| 构建成功但 `/api/builds/:id` 有 `deploy_err` | 构建仍成功、仅发布失败：`no compose file` 说明服务目录/文件名不符约定或只存在备份文件；`escapes services_dir` 说明 `deploy.services[].dir` 越出服务根；`docker compose up -d failed` 见日志末尾 docker 输出；`invalid wait_timeout` 见配置 |
-| 发布后容器仍是旧镜像 | compose 内用的是 `image: <服务名>:latest` 吗？若写死旧 tag 或用了 `build:` 则不会用新镜像；发布不 pull，镜像名/标签须与本次构建一致 |
-| 发布找不到服务目录 | `deploy.services_dir` 是否以**相同路径**挂载进容器（宿主机 `/data/services` → 容器 `/data/services`）；相对路径挂载会导致 compose 相对路径解析错误 |
-| 构建失败：`docker compose` 命令不存在 | 服务镜像缺少 compose 插件；确认 `Dockerfile` 已安装 `docker-cli-compose` 并重建镜像（`docker compose up -d --build`） |
 | 没收到飞书通知 | 看 `/api/builds/:id` 的 `NotifyError`：`webhook_url must be an https URL` 见配置；`lark rejected message` 多为 Webhook 失效/签名密钥不符；`lark returned 4xx` 为地址或权限问题；WARN 日志含脱敏后的地址 |
-| 飞书报签名错误 | 机器人开启“签名校验”后必须在 `notify.lark.secret` 填同一个密钥；未开启则留空 |
-| 构建失败：超时 | clone 超过 15 分钟、docker build 超过 25 分钟、单任务超过 30 分钟或单次发布超过 5 分钟会自动终止并标记（发布超时仅记 `deploy_err`），查看日志定位慢点 |
+| 飞书报签名错误 | 机器人开启“签名校验”后必须在 `notify.lark.secret`（或 `LARK_SECRET`）填同一个密钥；未开启则留空 |
+| 卡片标题为 `⚠️ 构建成功，部署失败` | 构建本身成功。看该构建日志 `deploy failed` 行与卡片的部署面板：`service dir ... does not exist` / `compose file ... does not exist` 为路径或挂载问题；`docker compose up -d failed` 为 compose 配置或服务启动失败，面板内的 `docker compose ps` 输出会显示容器状态 |
+| 构建成功但部署没生效 | 确认 `deploy.enabled: true`、`deploy.targets` 的 key 与 `repo_name` 一致（大小写不敏感），并查看日志是 `deploy skipped: no target for <repo_name>` 还是 `deploy skipped: deploy not enabled`；确认 compose 文件引用的是本地镜像（部署不会 pull） |
+| 部署报 `permission denied` / 找不到目录 | `deploy.targets[].dir` 必须是容器内绝对路径，且宿主机同一路径已挂载；`docker-compose.yml` 默认挂载 `/data/services:/data/services:ro`，改为实际目录或在容器内保持同路径 |
+| 构建失败：超时 | 对应步骤超过 `timeouts.clone` / `build` / `job` / `deploy`（默认 15m / 25m / 30m / 5m）会自动终止并标记，查看日志定位慢点 |

@@ -1,24 +1,25 @@
 # gitlab-builder
 
-GitLab Webhook 触发的**通用 Docker 镜像自动构建服务**。任何挂在授权 GitLab 域名下的项目，把 Webhook 指向本服务，Push 即自动产出本地镜像；不推送任何 Registry。
+GitLab Webhook 触发的**通用 Docker 镜像自动构建服务**。任何挂在授权 GitLab 域名下的项目，把 Webhook 指向本服务，Push 即自动产出本地镜像（可选推送 Registry、可选自动部署）。
 
 ## 特性
 
-- **无需登记仓库**：配置只有 `server`、`code` 与可选的 `build` / `registry` / `deploy`，不维护仓库列表；唯一准入条件是事件中的仓库地址属于 `code.domain`
+- **无需登记仓库**：配置只有 `server`、`code` 与可选的 `timeouts` / `build` / `registry` / `deploy` / `notify`，不维护仓库列表；唯一准入条件是事件中的仓库地址属于 `code.domain`
 - **默认仅本地构建，可选推送**：不配置 `registry.url` 时镜像只留在构建机；配置后构建成功自动打远程 tag 并 push（`docker login` + `docker push`）
-- **标签可配置**：默认标签 = Commit SHA 前 8 位；`build.tag` 设全局固定标签、`build.branch_tags` 按分支覆盖（如 `pre: latest`、`main: stable`）
-- **构建后自动发布（可选）**：配置 `deploy` 后，当某次构建产出的标签等于 `deploy.tag`（默认 `latest`）时，对目标服务执行 `docker compose up -d`，直接使用刚构建出的本地镜像（不 pull）；发布失败不影响构建结果（构建仍成功，错误记入 `deploy_err`）
-- **流水线通知（可选）**：配置 `notify.lark.webhook_url` 后，向飞书群机器人推送流水线开始 / 成功 / 失败卡片，字段与 Jenkins 共享库一致（项目名称、构建发起、当前版本 `分支-短SHA`、持续时间、提交摘要、错误摘要、推送时间）；部署失败会在成功卡片中追加提示；通知失败不影响构建（记入 `NotifyError`）
+- **镜像名取自仓库 URL 末尾**：`repo_name` = 仓库 URL 最后一个 `/` 与 `.git` 之间的值（转小写），同时用于镜像名、队列串行键与部署匹配键
+- **标签可配置**：默认标签 = `latest`；`build.tag` 设全局固定标签、`build.branch_tags` 按分支覆盖（如 `pre: latest`、`main: stable`）
+- **构建后自动部署（可选）**：`deploy.enabled` + `deploy.targets` 按 `repo_name` 匹配服务目录，构建成功后执行 `docker compose -f <dir>/<compose_file> up -d [service]`（不 pull，直接使用本地镜像）
+- **流水线通知（可选）**：配置 `notify.lark.webhook_url`（或 `LARK_WEBHOOK_URL` 环境变量）后，向飞书群机器人推送流水线开始 / 成功 / 失败卡片，字段与 Jenkins 共享库一致（项目名称、构建发起、当前版本 `分支-短SHA`、持续时间、提交摘要、错误摘要、推送时间）；成功卡片同时报告部署结果（已部署 / 未部署原因 / 部署失败），部署失败只影响卡片标题，构建仍为 success；通知失败不影响构建（记入 `NotifyError`）
 - **Docker Socket 构建**：服务容器通过挂载 `/var/run/docker.sock` 调用宿主机 `docker build`
 - **SSH Deploy Key**：一把全局只读 Deploy Key（经 `GITLAB_DEPLOY_KEY_PATH` 环境变量注入）拉取该 GitLab 实例下所有被触发仓库
 - **分支白名单**：`code.branches` 精确匹配（默认 `main`、`master`）
-- **Commit SHA 精确构建**：按 webhook 推送的 `checkout_sha` 精确 checkout（校验 40/64 位十六进制）；标签默认 = SHA 前 8 位，可经 `build.tag` / `build.branch_tags` 改为固定标签
-- **任务队列**：全局并发可配；**同一仓库（按归一化 URL）串行、不同仓库并行**
+- **Commit SHA 精确构建**：按 webhook 推送的 `checkout_sha` 精确 checkout（校验 40/64 位十六进制）
+- **任务队列**：全局并发可配；**同一 `repo_name` 串行、不同仓库并行**
 - **重复投递去重**：同一仓库的同一 Commit 在排队/构建期间不会重复入队，重发返回 `duplicate`
 - **Webhook Secret 校验**：`X-Gitlab-Token` 恒定时比较，常数时间防时序攻击
 - **仓库自带 Dockerfile 优先，内置模板兜底**：有 `Dockerfile` 就用（绝不覆盖）；没有时按语言标记（Go / Node / Vue / Java / Gradle / Python / PHP）套用内置模板并调用内置构建脚本（`build-go` / `build-maven` / `build-node` / `build-python` / `build-php`），两类都没有才明确报错
 - **构建日志**：每次构建的完整 git + docker 输出落盘，可经 API 查询；URL 凭据全程脱敏
-- **防泄漏与超时**：SSH 主机密钥 `accept-new`（首次 TOFU、之后拒绝变更）；clone 15 分钟 / docker build 25 分钟 / 单任务 30 分钟超时兜底
+- **防泄漏与超时**：SSH 主机密钥 `accept-new`（首次 TOFU、之后拒绝变更）；clone / docker build / 单任务 / 部署超时均可经 `timeouts` 配置（默认 15m / 25m / 30m / 5m）
 
 ## 架构
 
@@ -31,7 +32,7 @@ flowchart LR
     B -->|docker build -t image:tag| DK[Docker 守护进程<br/>via /var/run/docker.sock]
     DK --> IMG[本地镜像<br/>image:tag]
     B -.->|registry.url 已配置<br/>docker login + push| REG[镜像仓库<br/>可选]
-    B -.->|deploy.tag 匹配<br/>docker compose up -d| DEP[服务 compose<br/>/data/services<br/>可选]
+    B -.->|deploy.enabled 且 repo_name 命中<br/>docker compose up -d| SVC[服务目录<br/>/data/services/&lt;repo_name&gt;]
     B --> L[构建日志<br/>/app/logs/&lt;build_id&gt;.log]
 ```
 
@@ -61,6 +62,9 @@ docker compose up -d
 curl http://<构建机IP>:8080/api/builds
 ```
 
+> 需要构建后自动部署时，额外把服务目录挂载到容器内同一路径（见 `docker-compose.yml` 的
+> `/data/services:/data/services:ro`），并在 `deploy.targets` 中按 `repo_name` 登记目录。
+
 ## 环境变量
 
 | 变量 | 必填 | 说明 |
@@ -68,6 +72,8 @@ curl http://<构建机IP>:8080/api/builds
 | `GITLAB_WEBHOOK_SECRET` | 是 | Webhook Secret，与 GitLab 侧一致；未设置时启动失败 |
 | `GITLAB_DEPLOY_KEY_PATH` | 否 | 全局 SSH Deploy Key 私钥路径（容器内路径）；设置但文件不可读则启动失败 |
 | `REGISTRY_PASSWORD` | 否 | 供 `registry.password` 用 `${...}` 引用的镜像仓库密码；仅当配置了推送时需要 |
+| `LARK_WEBHOOK_URL` | 否 | 飞书机器人地址；`notify.lark.webhook_url` 为空时使用它（仍需 `notify.enabled: true`） |
+| `LARK_SECRET` | 否 | 飞书签名校验密钥；`notify.lark.secret` 为空时使用它 |
 | `LOG_LEVEL` | 否 | `debug` / `info`（默认）/ `warn` / `error` |
 
 ## API
@@ -88,6 +94,7 @@ Webhook 响应状态：
 | 202 `{"status":"ignored","reason":...}` | 非 Push / 删除事件 / 非分支 ref / Commit SHA 非法 |
 | 202 `{"status":"host_not_allowed"}` | 事件仓库地址域名不等于 `code.domain` |
 | 202 `{"status":"missing_repo_url"}` | 事件缺少仓库地址字段（异常 payload） |
+| 202 `{"status":"invalid_repo_name"}` | 仓库 URL 末尾无法得到合法的 Docker 镜像名（如全中文） |
 | 202 `{"status":"branch_filtered"}` | 分支不在 `code.branches` 白名单 |
 | 202 `{"status":"duplicate","build_id":...}` | 同仓库同 Commit 已在排队/构建中，未重复入队 |
 | 401 | Secret 校验失败 |
@@ -96,17 +103,24 @@ Webhook 响应状态：
 
 ## 镜像标签规则
 
-- **镜像名** = 仓库名（事件 `project.name`，转小写并规整为 Docker 合法字符 `[a-z0-9._-]`；URL 末段兜底）。不同仓库撞名时追加 `-<哈希8位>` 稳定后缀，不同项目绝不共享同一镜像名。
-- **标签**解析顺序：`build.branch_tags[分支]` → `build.tag` → Commit SHA 前 8 位。三者都未配置时保持旧的 SHA 前 8 位行为（不附加分支名）。标签必须是合法 Docker tag（`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$`）。
-- **推送**（仅当 `registry.url` 非空）= 在本地 tag 之外再打一个远程 tag `<url>[/<project>]/<镜像名>:<tag>` 并 `docker push`。
-- **发布**（仅当 `deploy.enabled` 且产出的 tag 等于 `deploy.tag`）= 在 `/data/services/<服务名>/<compose 文件>` 执行 `docker compose -p <项目名> up -d <服务名>`。
+- **镜像名（repo_name）** = 仓库 URL 最后一个 `/` 与 `.git` 之间的值，转小写并规整为 Docker 合法字符 `[a-z0-9._-]`。兼容 `https://`、`ssh://`、scp 形式 `git@host:group/repo.git`、末尾 `/`、无 `.git`、URL 内嵌账号/Token：
 
-推送 `main` 分支、commit `a1b2c3d4e5f6...`、项目 `Backend-API` 时：
+  ```
+  https://gitlab.com/group/Atlas-Market.git   -> atlas-market
+  git@gitlab.com:group/atlas-market.git       -> atlas-market
+  https://user:token@gitlab.com/group/repo/   -> repo
+  ```
+
+  不同仓库撞名时追加 `-<哈希8位>` 稳定后缀，不同项目绝不共享同一镜像名；部署匹配始终使用基础 `repo_name`（不带冲突后缀）。
+- **标签**解析顺序：`build.branch_tags[分支]` → `build.tag` → `latest`。三者都未配置时默认 `latest`。标签必须是合法 Docker tag（`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$`）。
+- **推送**（仅当 `registry.url` 非空）= 在本地 tag 之外再打一个远程 tag `<url>[/<project>]/<镜像名>:<tag>` 并 `docker push`。
+
+推送 `main` 分支、commit `a1b2c3d4e5f6...`、仓库 `Backend-API` 时：
 
 ```
-# 未配置 build.tag / branch_tags（默认）：
-backend-api:a1b2c3d4                              # 本地（始终）
-registry.example.com/tenants/backend-api:a1b2c3d4 # 远程（配置 registry.url 后）
+# 默认（未配置 build.tag / branch_tags）：
+backend-api:latest                                # 本地（始终）
+registry.example.com/tenants/backend-api:latest   # 远程（配置 registry.url 后）
 
 # 配置 build.branch_tags: {main: stable} 后：
 backend-api:stable                                # 本地（始终）
@@ -115,7 +129,7 @@ registry.example.com/tenants/backend-api:stable   # 远程（配置 registry.url
 
 ## 配置
 
-配置文件有 `server`、`code` 两段与可选的 `build` / `registry` / `deploy` / `notify` 段，全部字段与中文注释见 [`config/config.yaml`](config/config.yaml)：
+配置文件有 `server`、`code` 两段与可选的 `timeouts` / `build` / `registry` / `deploy` / `notify` 段，全部字段与中文注释见 [`config/config.yaml`](config/config.yaml)：
 
 ```yaml
 server:
@@ -130,7 +144,14 @@ code:
   domain: "code.gitlab.com"
   branches: ["main", "master"]
 
-# 可选；省略 = 标签默认取 Commit SHA 前 8 位
+# 可选；省略时使用默认值
+timeouts:
+  clone: "15m"
+  build: "25m"
+  job: "30m"
+  deploy: "5m"
+
+# 可选；省略 = 标签默认 latest
 build:
   tag: ""                      # 全局默认标签，例: latest
   branch_tags: {}              # 按分支覆盖，例: {main: stable, pre: latest}
@@ -142,29 +163,42 @@ registry:
   username: ""       # 与 password 成对出现；都填则推送前 docker login
   password: ""       # 建议用 ${REGISTRY_PASSWORD} 环境变量注入
 
-# 可选；省略或 enabled:false = 不自动发布
+# 可选；省略或 enabled:false = 不部署
 deploy:
   enabled: false
-  services_dir: "/data/services"     # 每服务一个子目录；需同路径挂载进容器
-  compose_file: "docker-compose.yaml" # 该目录内 compose 文件名（缺失时自动找 compose.yaml 等）
-  project_name: ""                    # 留空 = 服务目录名
-  tag: "latest"                       # 仅当产出标签等于它时发布
-  wait: false                         # up -d 后是否等待健康（--wait --wait-timeout）
-  wait_timeout: "120s"
-  # services:                         # 可选：按服务名覆盖路径/服务键/项目名/compose 文件名
-  #   ex-backend: {dir: ex-backend, service: ex-backend}
+  targets:
+    atlas-market:                     # key = 仓库 URL 末尾（repo_name，大小写不敏感）
+      dir: "/data/services/atlas-market"   # 容器内绝对路径，需与宿主机同路径挂载
+      compose_file: "docker-compose.yaml"  # 仅文件名
+      service: ""                     # 留空 = 启动整个 compose 文件
+      tag: ""                         # 兼容字段，保留解析但不参与判断
 
 # 可选；省略或 enabled:false = 不发送通知
 notify:
   enabled: false
   on_started: true                   # 🚀 流水线开始
-  on_success: true                   # ✅ 流水线成功（含“部署失败”提示）
+  on_success: true                   # ✅ 流水线成功
   on_failure: true                   # ❌ 流水线失败
   lark:
-    webhook_url: ""                  # 飞书机器人 Webhook（直接写配置；敏感，不落日志）
-    secret: ""                       # 可选：签名校验密钥
+    webhook_url: ""                  # 也可用 LARK_WEBHOOK_URL 环境变量提供
+    secret: ""                       # 可选：签名校验密钥（或 LARK_SECRET）
     timeout: "10s"                   # 单次投递超时
 ```
+
+## 自动部署（可选）
+
+`deploy.enabled: true` 且构建成功时，用基础 `repo_name`（URL 末尾，忽略撞名后缀）匹配 `deploy.targets` 的 key，命中后执行：
+
+```bash
+docker compose -f <dir>/<compose_file> up -d [service]
+```
+
+- 工作目录固定为 `<dir>`；`service` 留空则启动整个 compose 文件，填写则只启动该服务。
+- **不 pull**：compose 文件应直接引用刚构建出的本地镜像（如 `image: atlas-market:latest`），否则部署的可能是旧镜像。
+- 参数以数组传给 `docker`，绝不经过 shell 拼接；同名 compose 文件的操作串行执行。
+- `dir` 必须是**容器内绝对路径**，且宿主机同一路径已挂载进容器（`docker-compose.yml` 默认挂载 `/data/services:/data/services:ro`），否则 compose 里的 `.env` / `env_file` / bind mount 无法按宿主机路径解析。
+- 未开启 / 未命中时构建日志分别写 `deploy skipped: deploy not enabled` / `deploy skipped: no target for <repo_name>`。
+- 目录或 compose 文件缺失、`up` 失败均记为**部署失败**，随后自动执行 `docker compose ps` 收集输出；**构建状态仍为 success**，只影响通知卡片标题（`⚠️ 构建成功，部署失败`）。
 
 ## 构建文件选择
 

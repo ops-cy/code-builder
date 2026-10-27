@@ -1,10 +1,11 @@
-// Package config loads and validates the service configuration file.
+// Package config 负责加载并校验服务配置文件。
 package config
 
 import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -12,20 +13,20 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Config is the root configuration document: HTTP runtime settings plus the
-// authorised code-hosting instance. Repositories are never listed — any
-// project on code.domain that sends a webhook triggers a build, with its URL,
-// branch and commit taken from the event payload.
+// Config 是根配置文档：HTTP 运行时设置，以及被授权的代码托管实例。
+// 这里从不列出仓库：code.domain 上任何发送 webhook 的项目都会触发构建，
+// 其 URL、分支和提交信息都取自事件负载。
 type Config struct {
 	Server   ServerConfig   `yaml:"server"`
 	Code     CodeConfig     `yaml:"code"`
+	Timeouts TimeoutsConfig `yaml:"timeouts"`
 	Build    BuildConfig    `yaml:"build"`
 	Registry RegistryConfig `yaml:"registry"`
 	Deploy   DeployConfig   `yaml:"deploy"`
 	Notify   NotifyConfig   `yaml:"notify"`
 }
 
-// ServerConfig holds HTTP listener and workspace settings.
+// ServerConfig 保存 HTTP 监听与工作区设置。
 type ServerConfig struct {
 	Listen      string `yaml:"listen"`
 	Workspace   string `yaml:"workspace"`
@@ -34,47 +35,43 @@ type ServerConfig struct {
 	Concurrency int    `yaml:"concurrency"`
 }
 
-// CodeConfig identifies the authorised GitLab instance and the trigger
-// branch whitelist. It is the entire repository-access policy: no per-repo
-// fields exist.
+// CodeConfig 指定被授权的 GitLab 实例以及触发构建的分支白名单。
+// 它构成了全部的仓库访问策略：不存在按仓库配置的字段。
 type CodeConfig struct {
-	// WebhookSecret must equal the GitLab webhook Secret token; supplied via
-	// ${GITLAB_WEBHOOK_SECRET} environment expansion (unset vars fail boot).
+	// WebhookSecret 必须与 GitLab webhook 的 Secret token 一致；通过
+	// ${GITLAB_WEBHOOK_SECRET} 环境变量展开提供（变量未设置会导致启动失败）。
 	WebhookSecret string `yaml:"webhook_secret"`
-	// Domain is the GitLab instance repositories live on (e.g.
-	// "code.gitlab.com"). Events whose clone URL belongs to any other host
-	// are rejected as host_not_allowed. Plain domain or full URL both work;
-	// ports are ignored when comparing.
+	// Domain 是仓库所在 GitLab 实例的域名（例如 "code.gitlab.com"）。
+	// 若事件的克隆 URL 属于其他主机，会以 host_not_allowed 拒绝。
+	// 纯域名或完整 URL 均可；比较时会忽略端口。
 	Domain string `yaml:"domain"`
-	// Branches is the exact-match whitelist of push branches that trigger a
-	// build; defaults to [main, master] when omitted.
+	// Branches 是触发构建的 push 分支精确匹配白名单；
+	// 省略时默认为 [main, master]。
 	Branches []string `yaml:"branches"`
 }
 
-// RegistryConfig is the optional image-push target. It is disabled unless a
-// URL is configured, so an omitted section (or an empty url) keeps builds
-// local-only — the documented default.
+// RegistryConfig 是可选的镜像推送目标。除非配置了 URL，否则它处于禁用状态，
+// 因此省略该配置段（或 url 为空）时构建只在本地进行——这是文档中的默认行为。
 type RegistryConfig struct {
-	// URL is the registry host (e.g. "registry.example.com"); it doubles as
-	// the enable switch. A trailing slash is tolerated.
+	// URL 是 registry 主机（例如 "registry.example.com"）；它同时充当启用开关。
+	// 允许结尾带斜杠。
 	URL string `yaml:"url"`
-	// Project is an optional image-name prefix / namespace (e.g. "tenants").
+	// Project 是可选的镜像名前缀 / 命名空间（例如 "tenants"）。
 	Project string `yaml:"project"`
-	// Username and Password are optional credentials; when both are set a
-	// `docker login` runs before the push. When both are empty an already
-	// authenticated daemon (or an anonymous registry) is assumed.
+	// Username 和 Password 是可选的凭据；两者都设置时，推送前会执行
+	// `docker login`。两者都为空时，则假定 daemon 已通过认证
+	//（或该 registry 允许匿名访问）。
 	Username string `yaml:"username"`
 	Password string `yaml:"password"`
 }
 
-// Enabled reports whether built images are pushed after build. The URL is the
-// switch: no URL, no push.
+// Enabled 报告构建完成后是否会推送镜像。URL 就是开关：没有 URL 就不推送。
 func (r RegistryConfig) Enabled() bool {
 	return strings.TrimSpace(r.URL) != ""
 }
 
-// RemoteRef is the fully-qualified push reference for image:tag:
-// "<url>[/<project>]/<image>:<tag>", with redundant slashes normalised.
+// RemoteRef 返回 image:tag 的完整推送引用：
+// "<url>[/<project>]/<image>:<tag>"，重复的斜杠会被归一化。
 func (r RegistryConfig) RemoteRef(image, tag string) string {
 	base := strings.TrimRight(strings.TrimSpace(r.URL), "/")
 	if p := strings.Trim(strings.TrimSpace(r.Project), "/"); p != "" {
@@ -83,118 +80,144 @@ func (r RegistryConfig) RemoteRef(image, tag string) string {
 	return base + "/" + strings.TrimPrefix(image, "/") + ":" + tag
 }
 
-// BuildConfig controls the image tag applied to a successful build. Tags are
-// explicit: when neither field is set the commit-sha tag is kept for backward
-// compatibility, but configuring either replaces it.
+// BuildConfig 控制应用于成功构建的镜像 tag。
+// 默认为 "latest"；分支级或全局覆盖会替换它。
 type BuildConfig struct {
-	// Tag is the default tag for every branch (e.g. "latest").
+	// Tag 是所有分支的默认 tag（例如 "latest"）。
 	Tag string `yaml:"tag"`
-	// BranchTags overrides Tag for specific branches (exact match), e.g.
-	// {main: stable, pre: latest}.
+	// BranchTags 为特定分支覆盖 Tag（精确匹配），例如
+	// {main: stable, pre: latest}。
 	BranchTags map[string]string `yaml:"branch_tags"`
 }
 
-// ResolveTag returns the image tag for a build on branch: a branch-specific
-// override wins, then the global default, and finally the 8-char commit sha
-// (the pre-existing behaviour when nothing is configured).
-func (b BuildConfig) ResolveTag(branch, sha string) string {
+// ResolveTag 返回分支上构建所使用的镜像 tag：优先采用分支级覆盖，
+// 其次是全局默认值，最后回退到 "latest"。commit SHA 仅为兼容调用方而保留，
+// 已不再影响 tag。
+func (b BuildConfig) ResolveTag(branch, _ string) string {
 	if t, ok := b.BranchTags[branch]; ok && t != "" {
 		return t
 	}
 	if b.Tag != "" {
 		return b.Tag
 	}
-	if len(sha) >= 8 {
-		return sha[:8]
+	return "latest"
+}
+
+// TimeoutsConfig 独立限制流水线各步骤的耗时。取值是 Go 的
+// duration 格式（"15m"、"90s"）；省略的字段在加载时保留默认值。
+type TimeoutsConfig struct {
+	Clone  string `yaml:"clone"`
+	Build  string `yaml:"build"`
+	Job    string `yaml:"job"`
+	Deploy string `yaml:"deploy"`
+}
+
+// CloneDuration 返回 clone+checkout 超时时间（默认 15m）。
+func (t TimeoutsConfig) CloneDuration() time.Duration { return parseTimeout(t.Clone, 15*time.Minute) }
+
+// BuildDuration 返回 docker build 超时时间（默认 25m）。
+func (t TimeoutsConfig) BuildDuration() time.Duration { return parseTimeout(t.Build, 25*time.Minute) }
+
+// JobDuration 返回整条流水线的超时时间（默认 30m）。
+func (t TimeoutsConfig) JobDuration() time.Duration { return parseTimeout(t.Job, 30*time.Minute) }
+
+// DeployDuration 返回 docker compose 超时时间（默认 5m）。
+func (t TimeoutsConfig) DeployDuration() time.Duration { return parseTimeout(t.Deploy, 5*time.Minute) }
+
+// parseTimeout 解析 s；当 s 为空或非法时回退到 def。
+func parseTimeout(s string, def time.Duration) time.Duration {
+	if d, err := time.ParseDuration(s); err == nil && d > 0 {
+		return d
 	}
-	return sha
+	return def
 }
 
-// DeployConfig controls the optional post-build `docker compose up -d`. Each
-// service lives in its own directory under ServicesDir and is brought up with
-// the locally built image, so the compose file must reference
-// `image: <service>:<tag>` rather than `build:`.
+// DeployConfig 控制可选的构建后 `docker compose up -d`。
+// Targets 以仓库名（URL 最后一段路径，转为小写）为键：
+// 若构建的仓库名匹配某个 target，则构建成功后执行部署。
 type DeployConfig struct {
-	// Enabled turns deployment on; it only runs when the resolved build tag
-	// equals Tag.
+	// Enabled 开启部署。部署过程从不比较镜像 tag。
 	Enabled bool `yaml:"enabled"`
-	// ServicesDir is the container path holding one sub-directory per service
-	// (e.g. /data/services). It must be mounted at the same path from the host
-	// so compose can resolve relative paths and .env files.
-	ServicesDir string `yaml:"services_dir"`
-	// ComposeFile is the file name inside each service directory. When the
-	// configured name is absent, standard names (compose.yaml, ...) are tried.
-	ComposeFile string `yaml:"compose_file"`
-	// ProjectName overrides the compose project; empty means the service's
-	// directory name (compose's own default).
-	ProjectName string `yaml:"project_name"`
-	// Tag is the build tag that triggers deployment (e.g. "latest").
-	Tag string `yaml:"tag"`
-	// Wait adds `--wait` and waits up to WaitTimeout for healthy containers.
-	Wait        bool   `yaml:"wait"`
-	WaitTimeout string `yaml:"wait_timeout"`
-	// Services holds optional per-service path/name overrides, keyed by the
-	// image (service) name.
-	Services map[string]DeployService `yaml:"services"`
+	// Targets 将仓库名映射到其 compose 服务目录。
+	Targets map[string]DeployTarget `yaml:"targets"`
 }
 
-// DeployService overrides where/how one service is deployed.
-type DeployService struct {
-	// Dir is the sub-directory under ServicesDir (single path element).
+// DeployTarget 是构建后启动的一个服务目录。
+type DeployTarget struct {
+	// Dir 是服务目录在容器内的绝对路径。
 	Dir string `yaml:"dir"`
-	// Service is the compose service key to bring up.
-	Service string `yaml:"service"`
-	// ProjectName overrides the compose project for this service.
-	ProjectName string `yaml:"project_name"`
-	// ComposeFile overrides the compose file name for this service.
+	// ComposeFile 是 Dir 内的 compose 文件名（仅文件名，不含路径）。
 	ComposeFile string `yaml:"compose_file"`
+	// Service 可选地将 `up -d` 限定为单个 compose 服务；
+	// 为空则启动文件中的所有服务。
+	Service string `yaml:"service"`
+	// Tag 仅为向后兼容而保留，且被忽略：部署从不比较 tag。
+	Tag string `yaml:"tag"`
 }
 
-// NotifyConfig controls pipeline notifications (optional). Event switches use
-// pointers so an omitted key keeps the Jenkins-compatible default (true) while
-// an explicit false disables that event.
+// Target 按仓库名查找 target，忽略大小写。
+func (d DeployConfig) Target(repoName string) (DeployTarget, bool) {
+	name := strings.TrimSpace(repoName)
+	for key, t := range d.Targets {
+		if strings.EqualFold(strings.TrimSpace(key), name) {
+			return t, true
+		}
+	}
+	return DeployTarget{}, false
+}
+
+// dockerNamePattern 匹配 Docker 仓库名的组成部分（小写，
+// 分隔符只能出现在字母数字之间，与 normalizeDockerName 的输出一致）。
+var dockerNamePattern = regexp.MustCompile(`^[a-z0-9]+(?:[._-][a-z0-9]+)*$`)
+
+// composeServicePattern 匹配 compose 服务键。
+var composeServicePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
+
+// NotifyConfig 控制流水线通知（可选）。事件开关使用指针，
+// 这样省略该键时会保留与 Jenkins 兼容的默认值（true），
+// 而显式写成 false 则禁用该事件。
 type NotifyConfig struct {
-	// Enabled turns the notifier on. When false, nothing is sent.
+	// Enabled 开启通知器。为 false 时不发送任何通知。
 	Enabled bool `yaml:"enabled"`
-	// OnStarted / OnSuccess / OnFailure select which events notify (default true).
+	// OnStarted / OnSuccess / OnFailure 选择哪些事件需要通知（默认 true）。
 	OnStarted *bool `yaml:"on_started"`
 	OnSuccess *bool `yaml:"on_success"`
 	OnFailure *bool `yaml:"on_failure"`
-	// Lark is the Lark (Feishu) custom-bot channel; an empty webhook disables it.
+	// Lark 是 Lark（飞书）自定义机器人渠道；webhook 为空则禁用。
 	Lark LarkConfig `yaml:"lark"`
 }
 
-// LarkConfig is one Lark (Feishu) custom-bot webhook.
+// LarkConfig 表示一个 Lark（飞书）自定义机器人 webhook。
 type LarkConfig struct {
-	// WebhookURL is the full bot hook URL, e.g.
-	// https://open.feishu.cn/open-apis/bot/v2/hook/<token>. It is a secret:
-	// it is never written to logs.
+	// WebhookURL 是完整的机器人 hook URL，例如
+	// https://open.feishu.cn/open-apis/bot/v2/hook/<token>。它属于密钥：
+	// 永远不会写入日志。
 	WebhookURL string `yaml:"webhook_url"`
-	// Secret enables Lark's signature verification when non-empty.
+	// Secret 非空时启用 Lark 的签名校验。
 	Secret string `yaml:"secret"`
-	// Timeout bounds one delivery attempt (default 10s).
+	// Timeout 限制单次投递尝试的耗时（默认 10s）。
 	Timeout string `yaml:"timeout"`
 }
 
-// Started reports whether the pipeline-start event notifies (default true).
+// Started 报告流水线开始事件是否发送通知（默认 true）。
 func (n NotifyConfig) Started() bool { return n.OnStarted == nil || *n.OnStarted }
 
-// Success reports whether the success event notifies (default true).
+// Success 报告成功事件是否发送通知（默认 true）。
 func (n NotifyConfig) Success() bool { return n.OnSuccess == nil || *n.OnSuccess }
 
-// Failure reports whether the failure event notifies (default true).
+// Failure 报告失败事件是否发送通知（默认 true）。
 func (n NotifyConfig) Failure() bool { return n.OnFailure == nil || *n.OnFailure }
 
-// LarkEnabled reports whether notifications are enabled and a webhook exists.
+// LarkEnabled 报告通知是否已启用且存在 webhook。
 func (n NotifyConfig) LarkEnabled() bool {
 	return n.Enabled && strings.TrimSpace(n.Lark.WebhookURL) != ""
 }
 
-// tagPattern matches a valid Docker tag: starts alphanumeric/underscore and is
-// at most 128 chars of [A-Za-z0-9_.-].
+// tagPattern 匹配合法的 Docker tag：以字母、数字或下划线开头，
+// 最长 128 个字符，字符集为 [A-Za-z0-9_.-]。
 var tagPattern = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$`)
 
-// ValidateTag reports whether tag is a legal Docker image tag.
+// ValidateTag 报告 tag 是否为合法的 Docker 镜像 tag。
 func ValidateTag(tag string) error {
 	if !tagPattern.MatchString(tag) {
 		return fmt.Errorf("invalid docker tag %q", tag)
@@ -202,30 +225,28 @@ func ValidateTag(tag string) error {
 	return nil
 }
 
-// Repository is the runtime view of one build job, derived from the webhook
-// event. It is never parsed from YAML.
+// Repository 是单个构建任务在运行时的视图，由 webhook 事件派生而来。
+// 它从不从 YAML 中解析。
 type Repository struct {
-	// Key is the normalised clone URL — the identity for queue
-	// serialisation and duplicate-delivery detection.
+	// Key 是归一化后的克隆 URL——用于队列串行化和重复投递检测的身份标识。
 	Key string
-	// Name is the sanitised repository name used for display and as the
-	// workspace directory prefix.
+	// Name 是清洗后的仓库名，用于展示并作为工作区目录前缀。
 	Name          string
 	URL           string
 	DeployKeyPath string
 	Build         BuildSpec
 }
 
-// BuildSpec is the runtime build description handed to the builder.
-// Uniform for every repository by design.
+// BuildSpec 是传给构建器的运行时构建描述。
+// 按设计对所有仓库保持一致。
 type BuildSpec struct {
 	Image string
 }
 
 var envPattern = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
 
-// Load reads the YAML file at path, expands ${ENV_VAR} placeholders, applies
-// defaults, and validates the result.
+// Load 读取 path 处的 YAML 文件，展开 ${ENV_VAR} 占位符，
+// 应用默认值，并校验结果。
 func Load(path string) (Config, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -246,9 +267,9 @@ func Load(path string) (Config, error) {
 	return cfg, nil
 }
 
-// expandEnv substitutes ${VAR} with the environment value; unset vars are an
-// error. Lines whose first non-space character is '#' are comments and are
-// copied verbatim so documentation may mention ${VAR} freely.
+// expandEnv 用环境变量值替换 ${VAR}；变量未设置会报错。
+// 首个非空白字符为 '#' 的行是注释，会原样保留，
+// 因而文档中可以自由提及 ${VAR}。
 func expandEnv(raw []byte) ([]byte, error) {
 	var missing []string
 	lines := strings.Split(string(raw), "\n")
@@ -295,20 +316,28 @@ func (c *Config) applyDefaults() {
 	if len(c.Code.Branches) == 0 {
 		c.Code.Branches = []string{"main", "master"}
 	}
-	if c.Deploy.ServicesDir == "" {
-		c.Deploy.ServicesDir = "/data/services"
+	if c.Timeouts.Clone == "" {
+		c.Timeouts.Clone = "15m"
 	}
-	if c.Deploy.ComposeFile == "" {
-		c.Deploy.ComposeFile = "docker-compose.yaml"
+	if c.Timeouts.Build == "" {
+		c.Timeouts.Build = "25m"
 	}
-	if c.Deploy.Tag == "" {
-		c.Deploy.Tag = "latest"
+	if c.Timeouts.Job == "" {
+		c.Timeouts.Job = "30m"
 	}
-	if c.Deploy.WaitTimeout == "" {
-		c.Deploy.WaitTimeout = "120s"
+	if c.Timeouts.Deploy == "" {
+		c.Timeouts.Deploy = "5m"
 	}
 	if c.Notify.Lark.Timeout == "" {
 		c.Notify.Lark.Timeout = "10s"
+	}
+	// 环境变量优先于 YAML 文件，这样 webhook secret 就不必出现在
+	// 仓库中的 config.yaml 里。
+	if strings.TrimSpace(c.Notify.Lark.WebhookURL) == "" {
+		c.Notify.Lark.WebhookURL = strings.TrimSpace(os.Getenv("LARK_WEBHOOK_URL"))
+	}
+	if c.Notify.Lark.Secret == "" {
+		c.Notify.Lark.Secret = os.Getenv("LARK_SECRET")
 	}
 }
 
@@ -347,6 +376,9 @@ func (c Config) validate() error {
 			return fmt.Errorf("config: build.branch_tags[%s] = %q is not a valid docker tag", branch, tag)
 		}
 	}
+	if err := c.Timeouts.validate(); err != nil {
+		return err
+	}
 	if err := c.Deploy.validate(); err != nil {
 		return err
 	}
@@ -356,8 +388,69 @@ func (c Config) validate() error {
 	return nil
 }
 
-// validate checks the notify section; a disabled notifier is never validated so
-// a half-configured channel cannot block boot.
+// validate 检查每个已配置步骤的超时都是正数时长。
+func (t TimeoutsConfig) validate() error {
+	for _, f := range []struct {
+		name  string
+		value string
+	}{
+		{"clone", t.Clone},
+		{"build", t.Build},
+		{"job", t.Job},
+		{"deploy", t.Deploy},
+	} {
+		d, err := time.ParseDuration(f.value)
+		if err != nil || d <= 0 {
+			return fmt.Errorf("config: timeouts.%s %q is not a positive duration", f.name, f.value)
+		}
+	}
+	return nil
+}
+
+// validate 校验 deploy 配置段；被禁用的 deploy 不会校验，
+// 因此文件中残留的配置不会阻塞启动。
+func (d DeployConfig) validate() error {
+	if !d.Enabled {
+		return nil
+	}
+	if len(d.Targets) == 0 {
+		return fmt.Errorf("config: deploy.enabled requires at least one deploy.targets entry")
+	}
+	seen := make(map[string]string, len(d.Targets))
+	for key, t := range d.Targets {
+		name := strings.TrimSpace(key)
+		if name == "" {
+			return fmt.Errorf("config: deploy.targets must not contain an empty name")
+		}
+		lower := strings.ToLower(name)
+		if prev, dup := seen[lower]; dup {
+			return fmt.Errorf("config: deploy.targets[%q] duplicates %q (names are case-insensitive)", name, prev)
+		}
+		seen[lower] = name
+		if !dockerNamePattern.MatchString(lower) {
+			return fmt.Errorf("config: deploy.targets[%q] must be a valid docker repository name", name)
+		}
+		if strings.TrimSpace(t.Dir) == "" {
+			return fmt.Errorf("config: deploy.targets[%q].dir is required", name)
+		}
+		if !filepath.IsAbs(t.Dir) {
+			return fmt.Errorf("config: deploy.targets[%q].dir %q must be an absolute path", name, t.Dir)
+		}
+		if strings.TrimSpace(t.ComposeFile) == "" {
+			return fmt.Errorf("config: deploy.targets[%q].compose_file is required", name)
+		}
+		if filepath.Base(t.ComposeFile) != t.ComposeFile || t.ComposeFile == "." || t.ComposeFile == ".." {
+			return fmt.Errorf("config: deploy.targets[%q].compose_file %q must be a single file name", name, t.ComposeFile)
+		}
+		if t.Service != "" && !composeServicePattern.MatchString(t.Service) {
+			return fmt.Errorf("config: deploy.targets[%q].service %q is not a valid compose service name", name, t.Service)
+		}
+	}
+	return nil
+}
+
+// validate 校验 notify 配置段；被禁用的通知器不会校验，
+// 因此配置不完整的渠道不会阻塞启动。
 func (n NotifyConfig) validate() error {
 	if !n.Enabled {
 		return nil
@@ -378,43 +471,4 @@ func (n NotifyConfig) validate() error {
 		return fmt.Errorf("config: notify.lark.timeout %q is not a valid duration", n.Lark.Timeout)
 	}
 	return nil
-}
-
-func (d DeployConfig) validate() error {
-	if !d.Enabled {
-		return nil
-	}
-	if strings.TrimSpace(d.ServicesDir) == "" {
-		return fmt.Errorf("config: deploy.services_dir is required when deploy.enabled")
-	}
-	if strings.TrimSpace(d.ComposeFile) == "" {
-		return fmt.Errorf("config: deploy.compose_file is required when deploy.enabled")
-	}
-	if !tagPattern.MatchString(d.Tag) {
-		return fmt.Errorf("config: deploy.tag %q is not a valid docker tag", d.Tag)
-	}
-	if _, err := time.ParseDuration(d.WaitTimeout); err != nil {
-		return fmt.Errorf("config: deploy.wait_timeout %q is not a valid duration: %w", d.WaitTimeout, err)
-	}
-	for image, svc := range d.Services {
-		if strings.TrimSpace(image) == "" {
-			return fmt.Errorf("config: deploy.services must not contain an empty service name")
-		}
-		if svc.Dir != "" && !validPathElement(svc.Dir) {
-			return fmt.Errorf("config: deploy.services[%s].dir %q must be a single path element", image, svc.Dir)
-		}
-		if svc.Service != "" && strings.TrimSpace(svc.Service) == "" {
-			return fmt.Errorf("config: deploy.services[%s].service must not be blank", image)
-		}
-		if svc.ComposeFile != "" && !validPathElement(svc.ComposeFile) {
-			return fmt.Errorf("config: deploy.services[%s].compose_file %q must be a single path element", image, svc.ComposeFile)
-		}
-	}
-	return nil
-}
-
-// validPathElement reports whether s is safe to use as one path segment: it
-// must be non-empty, contain no separators, and not be "." or "..".
-func validPathElement(s string) bool {
-	return s != "" && s != "." && s != ".." && !strings.ContainsAny(s, `/\`)
 }
