@@ -90,12 +90,12 @@ func Test_ResolveDockerfile_when_NoRepoDockerfile_thenUseBuiltinTemplate(t *test
 		wantScript     bool
 		wantScriptIncl string
 	}{
-		{name: "go module", markerFile: "go.mod", markerBody: "module x\n", wantSource: "template:go", wantInFile: "FROM golang:", wantScript: true, wantScriptIncl: "go build"},
-		{name: "maven", markerFile: "pom.xml", markerBody: "<project/>\n", wantSource: "template:java", wantInFile: "maven:3.9-eclipse-temurin-21", wantScript: true, wantScriptIncl: "clean package"},
-		{name: "gradle", markerFile: "build.gradle", markerBody: "", wantSource: "template:gradle", wantInFile: "gradle:8-jdk21", wantScript: true, wantScriptIncl: "bootJar"},
-		{name: "node", markerFile: "package.json", markerBody: `{"dependencies":{"express":"^4"}}`, wantSource: "template:node", wantInFile: "node:22-alpine", wantScript: true, wantScriptIncl: "npm run build"},
-		{name: "vue", markerFile: "package.json", markerBody: `{"dependencies":{"vue":"^3"}}`, wantSource: "template:vue", wantInFile: "nginx:", wantScript: true, wantScriptIncl: "npm run build"},
-		{name: "rust", markerFile: "Cargo.toml", markerBody: "[package]\nname = \"demo\"\n", wantSource: "template:rust", wantInFile: "rust:1.83-slim", wantScript: true, wantScriptIncl: "cargo build --release"},
+		{name: "go module", markerFile: "go.mod", markerBody: "module x\n", wantSource: "template:go", wantInFile: "library/golang:${GO_VERSION}", wantScript: true, wantScriptIncl: "go build"},
+		{name: "maven", markerFile: "pom.xml", markerBody: "<project/>\n", wantSource: "template:java", wantInFile: "maven:3.9-eclipse-temurin-${JAVA_VERSION}", wantScript: true, wantScriptIncl: "clean package"},
+		{name: "gradle", markerFile: "build.gradle", markerBody: "", wantSource: "template:gradle", wantInFile: "gradle:8-jdk${JAVA_VERSION}", wantScript: true, wantScriptIncl: "bootJar"},
+		{name: "node", markerFile: "package.json", markerBody: `{"dependencies":{"express":"^4"}}`, wantSource: "template:node", wantInFile: "node:${NODE_VERSION}", wantScript: true, wantScriptIncl: "npm run build"},
+		{name: "vue", markerFile: "package.json", markerBody: `{"dependencies":{"vue":"^3"},"scripts":{"build":"vite build"}}`, wantSource: "template:vue", wantInFile: "library/nginx:", wantScript: true, wantScriptIncl: "npm run build"},
+		{name: "rust", markerFile: "Cargo.toml", markerBody: "[package]\nname = \"demo\"\n", wantSource: "template:rust", wantInFile: "rust:${RUST_VERSION}", wantScript: true, wantScriptIncl: "cargo build --release"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -138,8 +138,24 @@ func Test_ResolveDockerfile_when_NoRepoDockerfile_thenUseBuiltinTemplate(t *test
 			} else if scriptErr == nil {
 				t.Errorf("resolveDockerfile() wrote %s for %s, want none", templates.ScriptPath, source)
 			}
+
+			if _, wantEntry := templates.Entrypoint(templateName(source)); wantEntry {
+				entryPath := filepath.Join(repoDir, filepath.FromSlash(templates.EntrypointPath))
+				entry, err := os.ReadFile(entryPath)
+				if err != nil {
+					t.Fatalf("resolveDockerfile() did not write %s: %v", templates.EntrypointPath, err)
+				}
+				if !strings.Contains(string(entry), "COMMAND") {
+					t.Errorf("entrypoint does not support COMMAND:\n%s", entry)
+				}
+			}
 		})
 	}
+}
+
+// templateName 从 "template:go" 中提取模板名。
+func templateName(source string) templates.Name {
+	return templates.Name(strings.TrimPrefix(source, "template:"))
 }
 
 func Test_ResolveDockerfile_when_DockerignoreExcludesBuildDir_thenError(t *testing.T) {

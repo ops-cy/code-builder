@@ -48,5 +48,11 @@ func resolveDockerfile(repoDir string) (path, source string, err error) {
 			return "", "", fmt.Errorf("write build script for template %q: %w", tpl.Name, err)
 		}
 	}
+	if entrypoint, ok := templates.Entrypoint(tpl.Name); ok {
+		entryAbs := filepath.Join(repoDir, filepath.FromSlash(templates.EntrypointPath))
+		if err := os.WriteFile(entryAbs, entrypoint, 0o755); err != nil {
+			return "", "", fmt.Errorf("write entrypoint for template %q: %w", tpl.Name, err)
+		}
+	}
 	return p, "template:" + string(tpl.Name), nil
 }

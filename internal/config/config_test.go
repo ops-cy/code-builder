@@ -946,8 +946,8 @@ deploy:
 	if !cfg.Deploy.Enabled || cfg.Deploy.Root != root {
 		t.Errorf("deploy = %+v", cfg.Deploy)
 	}
-	if !cfg.Deploy.WaitEnabled() || !cfg.Deploy.RemoveOrphansEnabled() {
-		t.Errorf("deploy defaults not applied: %+v", cfg.Deploy)
+	if cfg.Deploy.WaitEnabled() || cfg.Deploy.RemoveOrphansEnabled() {
+		t.Errorf("deploy wait/remove_orphans should default to false: %+v", cfg.Deploy)
 	}
 }
 

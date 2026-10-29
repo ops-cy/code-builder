@@ -14,6 +14,8 @@ import (
 
 	"code-builder/internal/config"
 	"code-builder/internal/gitx"
+	"code-builder/internal/network"
+	"code-builder/internal/stack"
 )
 
 // Request 是解析后的构建输入。
@@ -28,6 +30,8 @@ type Request struct {
 	Registry config.RegistryConfig
 	// Build 控制额外 tag、build args、labels、平台与缓存。
 	Build config.BuildConfig
+	// Mirrors 是本次构建使用的国内外下载源。
+	Mirrors network.Mirrors
 	// CloneTimeout / BuildTimeout 约束克隆和 docker build 步骤的时长；为零时沿用包内的默认值。
 	CloneTimeout time.Duration
 	BuildTimeout time.Duration
@@ -65,6 +69,11 @@ func Build(ctx context.Context, req Request) ([]string, error) {
 	}
 	fmt.Fprintf(req.Log, "==> clone done duration=%s\n", time.Since(cloneStart).Round(time.Millisecond))
 
+	st := stack.Analyze(dest, req.Build.Stack)
+	fmt.Fprintf(req.Log, "==> stack language=%s framework=%s build_tool=%s go=%s java=%s node=%s rust=%s package_manager=%s\n",
+		st.Language, st.Framework, st.BuildTool, st.GoVersion, st.JavaVersion, st.NodeVersion, st.RustVersion, st.PackageManager)
+	fmt.Fprintf(req.Log, "==> network %s\n", req.Mirrors.String())
+
 	dockerfileAbs, dockerfileSource, err := resolveDockerfile(dest)
 	if err != nil {
 		return nil, fmt.Errorf("builder: %w", err)
@@ -81,12 +90,30 @@ func Build(ctx context.Context, req Request) ([]string, error) {
 	}
 
 	buildArgs := map[string]string{
-		"BUILD_SHA":     req.SHA,
-		"BUILD_BRANCH":  req.Branch,
-		"BUILD_TAG":     req.Tag,
-		"BUILD_DATE":    time.Now().UTC().Format(time.RFC3339),
-		"BUILD_VERSION": req.Tag,
+		"BUILD_SHA":       req.SHA,
+		"BUILD_BRANCH":    req.Branch,
+		"BUILD_TAG":       req.Tag,
+		"BUILD_DATE":      time.Now().UTC().Format(time.RFC3339),
+		"BUILD_VERSION":   req.Tag,
+		"APP_NAME":        req.Repo.Name,
+		"GO_VERSION":      st.GoVersion,
+		"RUST_VERSION":    st.RustVersion,
+		"JAVA_VERSION":    st.JavaVersion,
+		"NODE_VERSION":    st.NodeVersion,
+		"PACKAGE_MANAGER": st.PackageManager,
+		"CGO_ENABLED":     "0",
 	}
+	if req.Build.Stack.CGOEnabled {
+		buildArgs["CGO_ENABLED"] = "1"
+	}
+	setIfNotEmpty(buildArgs, "GOPROXY", req.Mirrors.GoProxy)
+	setIfNotEmpty(buildArgs, "GOSUMDB", req.Mirrors.GoSumDB)
+	setIfNotEmpty(buildArgs, "NPM_REGISTRY", req.Mirrors.NPMRegistry)
+	setIfNotEmpty(buildArgs, "MAVEN_MIRROR", req.Mirrors.MavenMirror)
+	setIfNotEmpty(buildArgs, "GRADLE_MIRROR", req.Mirrors.GradleMirror)
+	setIfNotEmpty(buildArgs, "CARGO_REGISTRY", req.Mirrors.CargoRegistry)
+	setIfNotEmpty(buildArgs, "APK_MIRROR", req.Mirrors.APKMirror)
+	setIfNotEmpty(buildArgs, "APT_MIRROR", req.Mirrors.APTMirror)
 	for k, v := range req.Build.Args {
 		buildArgs[k] = v
 	}
@@ -144,6 +171,12 @@ func imageRefs(image, tag string, reg config.RegistryConfig) (tags, pushRefs []s
 		}
 	}
 	return tags, pushRefs, login, nil
+}
+
+func setIfNotEmpty(m map[string]string, key, value string) {
+	if strings.TrimSpace(value) != "" {
+		m[key] = value
+	}
 }
 
 // addExtraTags 在 build.sha_tag 启用时追加 sha-<短SHA> 本地 / 远程标签。

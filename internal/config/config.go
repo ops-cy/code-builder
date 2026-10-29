@@ -19,11 +19,29 @@ import (
 type Config struct {
 	Server   ServerConfig   `yaml:"server"`
 	Code     CodeConfig     `yaml:"code"`
+	Network  NetworkConfig  `yaml:"network"`
 	Timeouts TimeoutsConfig `yaml:"timeouts"`
 	Build    BuildConfig    `yaml:"build"`
 	Registry RegistryConfig `yaml:"registry"`
 	Deploy   DeployConfig   `yaml:"deploy"`
 	Notify   NotifyConfig   `yaml:"notify"`
+}
+
+// NetworkConfig 控制构建时使用的软件包下载源。region=auto 时会探测
+// 国内 / 国外镜像的可达性与延迟，并缓存探测结果。
+type NetworkConfig struct {
+	Region       string `yaml:"region"`
+	ProbeTimeout string `yaml:"probe_timeout"`
+	CacheTTL     string `yaml:"cache_ttl"`
+
+	GoProxy       string `yaml:"goproxy"`
+	GoSumDB       string `yaml:"gosumdb"`
+	NPMRegistry   string `yaml:"npm_registry"`
+	MavenMirror   string `yaml:"maven_mirror"`
+	GradleMirror  string `yaml:"gradle_mirror"`
+	CargoRegistry string `yaml:"cargo_registry"`
+	APKMirror     string `yaml:"apk_mirror"`
+	APTMirror     string `yaml:"apt_mirror"`
 }
 
 // ServerConfig 保存 HTTP 监听、工作区与构建记录设置。
@@ -218,6 +236,19 @@ type BuildConfig struct {
 	Labels map[string]string `yaml:"labels"`
 	// CacheFrom 是 docker build --cache-from 列表。
 	CacheFrom []string `yaml:"cache_from"`
+	// Stack 是技术栈版本与构建参数的默认/覆盖值。
+	Stack BuildStackConfig `yaml:"stack"`
+}
+
+// BuildStackConfig 控制模板使用的语言版本与构建参数。留空表示自动检测。
+type BuildStackConfig struct {
+	GoVersion      string `yaml:"go_version"`
+	RustVersion    string `yaml:"rust_version"`
+	JavaVersion    string `yaml:"java_version"`
+	JavaMinVersion string `yaml:"java_min_version"`
+	NodeVersion    string `yaml:"node_version"`
+	PackageManager string `yaml:"package_manager"`
+	CGOEnabled     bool   `yaml:"cgo_enabled"`
 }
 
 // ResolveTag 返回分支上构建所使用的镜像 tag。
@@ -265,13 +296,13 @@ type DeployConfig struct {
 	Root string `yaml:"root"`
 	// ComposeFiles 是自动探测 compose 文件的顺序。
 	ComposeFiles []string `yaml:"compose_files"`
-	// Wait 为 true（默认）时使用 compose --wait 等待容器健康。
+	// Wait 为 true 时使用 compose --wait 等待容器健康；默认关闭。
 	Wait *bool `yaml:"wait"`
 	// WaitTimeout 是 --wait-timeout 的值（默认 120s）。
 	WaitTimeout string `yaml:"wait_timeout"`
 	// Pull 传给 compose --pull：never（默认）/ missing / always。
 	Pull string `yaml:"pull"`
-	// RemoveOrphans 为 true（默认）时传 --remove-orphans。
+	// RemoveOrphans 为 true 时传 --remove-orphans；默认关闭。
 	RemoveOrphans *bool `yaml:"remove_orphans"`
 	// Targets 是显式登记；匹配 owner/repo 或 repo_name，优先于自动发现。
 	Targets map[string]DeployTarget `yaml:"targets"`
@@ -291,11 +322,13 @@ type DeployTarget struct {
 // DefaultComposeFiles 是自动探测时依次尝试的文件名。
 var DefaultComposeFiles = []string{"docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"}
 
-// WaitEnabled 报告是否使用 compose --wait。
-func (d DeployConfig) WaitEnabled() bool { return d.Wait == nil || *d.Wait }
+// WaitEnabled 报告是否使用 compose --wait（默认关闭）。
+func (d DeployConfig) WaitEnabled() bool { return d.Wait != nil && *d.Wait }
 
-// RemoveOrphansEnabled 报告是否传 --remove-orphans。
-func (d DeployConfig) RemoveOrphansEnabled() bool { return d.RemoveOrphans == nil || *d.RemoveOrphans }
+// RemoveOrphansEnabled 报告是否传 --remove-orphans（默认关闭）。
+func (d DeployConfig) RemoveOrphansEnabled() bool {
+	return d.RemoveOrphans != nil && *d.RemoveOrphans
+}
 
 // ComposeFileCandidates 返回要探测的 compose 文件名。
 func (d DeployConfig) ComposeFileCandidates() []string {
@@ -362,7 +395,10 @@ func (n NotifyConfig) LarkEnabled() bool {
 	return n.Enabled && strings.TrimSpace(n.Lark.WebhookURL) != ""
 }
 
-var tagPattern = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$`)
+var (
+	tagPattern     = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$`)
+	versionPattern = regexp.MustCompile(`^[0-9]+(\.[0-9]+)*$`)
+)
 
 // ValidateTag 报告 tag 是否为合法的 Docker 镜像 tag。
 func ValidateTag(tag string) error {
@@ -474,6 +510,21 @@ func (c *Config) applyDefaults() {
 	if len(c.Code.Branches) == 0 {
 		c.Code.Branches = []string{"main", "master"}
 	}
+	if c.Network.Region == "" {
+		c.Network.Region = "auto"
+	}
+	if c.Network.ProbeTimeout == "" {
+		c.Network.ProbeTimeout = "3s"
+	}
+	if c.Network.CacheTTL == "" {
+		c.Network.CacheTTL = "10m"
+	}
+	if c.Build.Stack.JavaMinVersion == "" {
+		c.Build.Stack.JavaMinVersion = "8"
+	}
+	if c.Build.Stack.PackageManager == "" {
+		c.Build.Stack.PackageManager = "auto"
+	}
 	if c.Timeouts.Clone == "" {
 		c.Timeouts.Clone = "15m"
 	}
@@ -519,6 +570,12 @@ func (c Config) validate() error {
 		return fmt.Errorf("config: code.webhook_secret is required (use ${WEBHOOK_SECRET})")
 	}
 	if _, err := c.Code.ResolveProviders(); err != nil {
+		return err
+	}
+	if err := c.Network.validate(); err != nil {
+		return err
+	}
+	if err := c.Build.Stack.validate(); err != nil {
 		return err
 	}
 	if c.Server.Concurrency < 1 {
@@ -580,6 +637,47 @@ func (t TimeoutsConfig) validate() error {
 		if err != nil || d <= 0 {
 			return fmt.Errorf("config: timeouts.%s %q is not a positive duration", f.name, f.value)
 		}
+	}
+	return nil
+}
+
+func (n NetworkConfig) validate() error {
+	switch n.Region {
+	case "auto", "cn", "global":
+	default:
+		return fmt.Errorf("config: network.region %q must be auto, cn or global", n.Region)
+	}
+	for _, f := range []struct {
+		name  string
+		value string
+	}{{"probe_timeout", n.ProbeTimeout}, {"cache_ttl", n.CacheTTL}} {
+		d, err := time.ParseDuration(f.value)
+		if err != nil || d <= 0 {
+			return fmt.Errorf("config: network.%s %q is not a positive duration", f.name, f.value)
+		}
+	}
+	return nil
+}
+
+func (s BuildStackConfig) validate() error {
+	for _, f := range []struct {
+		name  string
+		value string
+	}{
+		{"go_version", s.GoVersion},
+		{"rust_version", s.RustVersion},
+		{"java_version", s.JavaVersion},
+		{"java_min_version", s.JavaMinVersion},
+		{"node_version", s.NodeVersion},
+	} {
+		if f.value != "" && !versionPattern.MatchString(f.value) {
+			return fmt.Errorf("config: build.stack.%s %q is not a valid version", f.name, f.value)
+		}
+	}
+	switch s.PackageManager {
+	case "", "auto", "npm", "pnpm", "yarn", "bun":
+	default:
+		return fmt.Errorf("config: build.stack.package_manager %q must be auto, npm, pnpm, yarn or bun", s.PackageManager)
 	}
 	return nil
 }

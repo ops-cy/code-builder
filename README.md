@@ -12,8 +12,10 @@
 - **内置模板**：Go、Rust、Java（Maven）、Java（Gradle）、Node、Vue/React/Svelte 等前端
 - **运行镜像保留 shell**：不使用 `scratch` / distroless，构建出的容器可直接 `docker exec -it <container> sh`
 - **默认仅本地构建**：配置 `registry.url` 后自动打远程 tag 并 push
-- **本机自动部署**：标准目录 `/data/services/<repo_name>/docker-compose.yml` 零配置部署；也支持显式 targets
-- **部署更稳**：`--no-build --pull never --wait --remove-orphans`，失败时自动收集 `compose ps` 与最近日志
+- **本机部署**：按 `deploy.targets` 把仓库映射到 `/data/services/{服务别名}/docker-compose.yaml`
+- **部署更稳**：`--no-build --pull never`，失败时自动收集 `compose ps` 与最近日志
+- **一个镜像多服务**：entrypoint 支持 `COMMAND` / compose `command`
+- **国内外下载源自动切换**：`network.region: auto` 自动选择 Go / NPM / Maven / Gradle / Cargo / apk / apt 镜像源
 - **构建记录持久化**：重启后 `/api/builds` 仍可看到历史记录
 - **流水线通知（可选）**：飞书卡片；部署失败只影响卡片标题，不影响构建成功状态
 
@@ -74,52 +76,90 @@ code:
 
 ## 内置模板
 
+模板只读取仓库根目录标记文件；仓库根目录有 `Dockerfile` 时始终优先使用。
+
 | 模板 | 触发文件 | 运行镜像 |
 |---|---|---|
 | Go | `go.mod` | `alpine:3.22`（带 shell） |
 | Rust | `Cargo.toml` | `debian:bookworm-slim`（带 shell） |
-| Java Maven | `pom.xml` | `eclipse-temurin:21-jre` |
-| Java Gradle | `build.gradle` / `build.gradle.kts` | `eclipse-temurin:21-jre` |
-| Node | `package.json` | `node:22-alpine` |
+| Java Maven | `pom.xml` | `eclipse-temurin:<检测到的 Java 版本>-jre` |
+| Java Gradle | `build.gradle` / `build.gradle.kts` | `eclipse-temurin:<检测到的 Java 版本>-jre` |
+| Node | `package.json` | `node:<检测到的 Node 版本>-alpine` |
 | Vue/React/Svelte/Angular 前端 | `package.json` 含对应框架或 `vite` | `nginx:1.27-alpine` |
 
-- 仓库根目录有 `Dockerfile` 时始终优先使用它，不写任何构建脚本。
-- 使用内置模板时，构建器会写入 `.code-builder/build.sh`；仓库没有 `.dockerignore` 时自动生成一份默认规则。
+- Java 版本从 `pom.xml` / `build.gradle` 自动检测，支持 8 / 11 / 17 / 21。
+- Node 版本从 `package.json` 的 `volta.node` / `engines.node` 自动检测，包管理器从 lockfile 自动判断。
+- 使用内置模板时，构建器会写入 `.code-builder/build.sh` 与 `.code-builder/entrypoint.sh`；仓库没有 `.dockerignore` 时自动生成默认规则。
 - 若仓库 `.dockerignore` 排除了 `.code-builder`，构建会提前报错；请删除该规则或自带 Dockerfile。
-- 入口/产物约定见 [`docs/TEMPLATES.md`](docs/TEMPLATES.md)。
+- 运行入口支持 `COMMAND` 环境变量 / compose `command`，一个镜像可以启动多个不同角色的服务。
+
+## 下载源
+
+```yaml
+network:
+  region: auto
+  probe_timeout: "3s"
+  cache_ttl: "10m"
+```
+
+- `auto` 自动探测国内 / 国外，选择 Go、NPM、Maven、Gradle、Cargo、apk、apt 镜像源。
+- `cn` / `global` 可强制指定。
+- 单项配置非空时覆盖自动结果。
+- Docker 基础镜像加速由宿主机 `/etc/docker/daemon.json` 维护，本服务不配置。
 
 ## 自动部署
 
-推荐标准布局，无需在配置中登记：
+当前推荐布局：
 
+```text
+/data/services/{服务别名}/docker-compose.yaml
 ```
-/data/services/<repo_name>/docker-compose.yml
-```
+
+服务别名不等于仓库名时，用 `deploy.targets` 映射：
 
 ```yaml
 deploy:
   enabled: true
-  root: "/data/services"
-  wait: true
+  wait: false
   wait_timeout: "120s"
   pull: "never"
-  remove_orphans: true
+  remove_orphans: false
+  targets:
+    atlas-market:                         # 仓库名或 owner/repo
+      dir: "/data/services/order-service" # 服务别名目录
+      compose_file: "docker-compose.yaml"
+      service: ""                         # 留空启动整个 compose
 ```
 
 构建成功后执行：
 
 ```bash
-docker compose -f <compose> up -d \
-  --no-build --pull never --remove-orphans \
-  --wait --wait-timeout 120s [service]
+docker compose -f <compose> up -d --no-build --pull never [service]
 ```
 
 - `--no-build`：部署阶段绝不重新构建。
 - `--pull never`：只使用刚构建出的本地镜像。
-- `--wait`：等待容器 running/healthy。
+- `wait` / `remove_orphans` 默认关闭，需要时显式开启。
 - 失败时自动收集 `docker compose ps` 与 `docker compose logs --tail=100`，写入构建日志和通知。
 - compose 可直接引用注入变量：`image: ${BUILDER_IMAGE:-app:latest}`。
-- 也支持显式 `deploy.targets`，key 可以是 `repo_name` 或 `owner/repo`，优先于自动发现。
+- 一个镜像启动多个服务：
+
+```yaml
+services:
+  api:
+    image: ${BUILDER_IMAGE}
+    command: ["--role=api"]
+
+  worker:
+    image: ${BUILDER_IMAGE}
+    command: ["--role=worker"]
+
+  # 或使用 COMMAND 环境变量
+  job:
+    image: ${BUILDER_IMAGE}
+    environment:
+      COMMAND: "/app/app --role=job"
+```
 
 ## 镜像与标签
 

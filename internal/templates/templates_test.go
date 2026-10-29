@@ -26,15 +26,15 @@ func TestDetect(t *testing.T) {
 		{name: "gradle groovy", files: map[string]string{"build.gradle": ""}, want: NameGradle, ok: true},
 		{name: "gradle kotlin", files: map[string]string{"build.gradle.kts": ""}, want: NameGradle, ok: true},
 		{name: "node", files: map[string]string{"package.json": `{"dependencies":{"express":"^4"}}`}, want: NameNode, ok: true},
-		{name: "vue dependency", files: map[string]string{"package.json": `{"dependencies":{"vue":"^3"}}`}, want: NameVue, ok: true},
-		{name: "vue scoped dependency", files: map[string]string{"package.json": `{"devDependencies":{"@vue/cli":"^5"}}`}, want: NameVue, ok: true},
-		{name: "vue prefixed dependency", files: map[string]string{"package.json": `{"dependencies":{"vue-router":"^4"}}`}, want: NameVue, ok: true},
+		{name: "vue dependency", files: map[string]string{"package.json": `{"dependencies":{"vue":"^3"},"scripts":{"build":"vite build"}}`}, want: NameVue, ok: true},
+		{name: "vue scoped dependency", files: map[string]string{"package.json": `{"devDependencies":{"@vue/cli":"^5"},"scripts":{"build":"vue-cli-service build"}}`}, want: NameVue, ok: true},
+		{name: "vue prefixed dependency", files: map[string]string{"package.json": `{"dependencies":{"vue-router":"^4"},"scripts":{"build":"vite build"}}`}, want: NameVue, ok: true},
 		{name: "nuxt uses node runtime", files: map[string]string{"package.json": `{"dependencies":{"nuxt":"^3"}}`}, want: NameNode, ok: true},
 		{name: "go wins over node", files: map[string]string{"go.mod": "module x", "package.json": `{"dependencies":{"vue":"^3"}}`}, want: NameGo, ok: true},
 		{name: "unparseable package.json falls back to node", files: map[string]string{"package.json": "not json"}, want: NameNode, ok: true},
 		{name: "rust", files: map[string]string{"Cargo.toml": "[package]\nname = \"x\""}, want: NameRust, ok: true},
-		{name: "react", files: map[string]string{"package.json": `{"dependencies":{"react":"^18"}}`}, want: NameVue, ok: true},
-		{name: "vite", files: map[string]string{"package.json": `{"devDependencies":{"vite":"^5"}}`}, want: NameVue, ok: true},
+		{name: "react", files: map[string]string{"package.json": `{"dependencies":{"react":"^18"},"scripts":{"build":"vite build"}}`}, want: NameVue, ok: true},
+		{name: "vite", files: map[string]string{"package.json": `{"devDependencies":{"vite":"^5"},"scripts":{"build":"vite build"}}`}, want: NameVue, ok: true},
 		{name: "go wins over rust", files: map[string]string{"go.mod": "module x", "Cargo.toml": "[package]"}, want: NameGo, ok: true},
 		{name: "no marker", files: map[string]string{"README.md": "x"}, ok: false},
 		{name: "empty dir", files: map[string]string{}, ok: false},
@@ -132,6 +132,22 @@ func TestDockerignoreExcludesBuildDir(t *testing.T) {
 	}
 	if !DockerignoreExcludesBuildDir(dir) {
 		t.Error("DockerignoreExcludesBuildDir() = false, want true")
+	}
+}
+
+func TestEntrypoint_supportsCommandOverride(t *testing.T) {
+	for _, name := range []Name{NameGo, NameRust, NameJava, NameGradle, NameNode} {
+		content, ok := Entrypoint(name)
+		if !ok {
+			t.Errorf("Entrypoint(%q) not embedded", name)
+			continue
+		}
+		if !strings.Contains(string(content), "COMMAND") {
+			t.Errorf("Entrypoint(%q) does not support COMMAND:\n%s", name, content)
+		}
+	}
+	if _, ok := Entrypoint(NameVue); ok {
+		t.Error("Vue template should not have a container entrypoint")
 	}
 }
 

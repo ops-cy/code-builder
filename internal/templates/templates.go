@@ -13,7 +13,7 @@ import (
 	"strings"
 )
 
-//go:embed go.Dockerfile node.Dockerfile vue.Dockerfile java.Dockerfile gradle.Dockerfile rust.Dockerfile scripts/*.sh
+//go:embed go.Dockerfile node.Dockerfile vue.Dockerfile java.Dockerfile gradle.Dockerfile rust.Dockerfile scripts/*.sh entrypoints/*.sh
 var files embed.FS
 
 // Name 标识一个内置模板。
@@ -37,6 +37,9 @@ type Template struct {
 // ScriptPath 是构建器写入模板所调用构建脚本的固定位置（相对于仓库根目录）。
 const ScriptPath = ".code-builder/build.sh"
 
+// EntrypointPath 是构建器写入模板运行入口的固定位置。
+const EntrypointPath = ".code-builder/entrypoint.sh"
+
 // scriptByTemplate 将模板映射到其运行的嵌入式构建脚本。
 var scriptByTemplate = map[Name]string{
 	NameGo:     "scripts/build-go.sh",
@@ -45,6 +48,27 @@ var scriptByTemplate = map[Name]string{
 	NameNode:   "scripts/build-node.sh",
 	NameVue:    "scripts/build-node.sh",
 	NameRust:   "scripts/build-rust.sh",
+}
+
+var entrypointByTemplate = map[Name]string{
+	NameGo:     "entrypoints/app.sh",
+	NameRust:   "entrypoints/app.sh",
+	NameJava:   "entrypoints/java.sh",
+	NameGradle: "entrypoints/java.sh",
+	NameNode:   "entrypoints/node.sh",
+}
+
+// Entrypoint 返回模板运行镜像使用的入口脚本。Vue 静态模板没有入口脚本。
+func Entrypoint(name Name) (content []byte, ok bool) {
+	path, ok := entrypointByTemplate[name]
+	if !ok {
+		return nil, false
+	}
+	content, err := files.ReadFile(path)
+	if err != nil {
+		return nil, false
+	}
+	return content, true
 }
 
 // Script 返回指定模板所调用的构建脚本。
@@ -107,8 +131,13 @@ func packageIsFrontend(repoDir string) bool {
 	var pkg struct {
 		Dependencies    map[string]json.RawMessage `json:"dependencies"`
 		DevDependencies map[string]json.RawMessage `json:"devDependencies"`
+		Scripts         map[string]string          `json:"scripts"`
 	}
 	if err := json.Unmarshal(data, &pkg); err != nil {
+		return false
+	}
+	// 没有 build 脚本时不套静态前端模板，避免构建后没有 dist/。
+	if pkg.Scripts["build"] == "" {
 		return false
 	}
 	for _, deps := range []map[string]json.RawMessage{pkg.Dependencies, pkg.DevDependencies} {

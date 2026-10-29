@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"code-builder/internal/config"
+	"code-builder/internal/network"
 	"code-builder/internal/notify"
 	"code-builder/internal/queue"
 	"code-builder/internal/server"
@@ -47,6 +48,7 @@ func main() {
 		logger.Error("resolve providers", slog.Any("err", err))
 		os.Exit(1)
 	}
+	networkResolver := network.New(cfg.Network, logger)
 
 	st := store.NewPersistent(cfg.Server.LogsDir, cfg.Server.StateFile)
 	q := queue.New(cfg.Server.Concurrency, cfg.Server.QueueSize)
@@ -85,6 +87,7 @@ func main() {
 		Workspace:     cfg.Server.Workspace,
 		Registry:      cfg.Registry,
 		Build:         cfg.Build,
+		Network:       networkResolver,
 		Timeouts:      cfg.Timeouts,
 		Deploy:        cfg.Deploy,
 		Notify:        notify.New(cfg.Notify, logger),

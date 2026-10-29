@@ -15,6 +15,7 @@ import (
 	"code-builder/internal/config"
 	"code-builder/internal/deploy"
 	"code-builder/internal/gitx"
+	"code-builder/internal/network"
 	"code-builder/internal/notify"
 	"code-builder/internal/queue"
 	"code-builder/internal/store"
@@ -39,6 +40,7 @@ type Deps struct {
 	Workspace     string
 	Registry      config.RegistryConfig
 	Build         config.BuildConfig
+	Network       *network.Resolver
 	Timeouts      config.TimeoutsConfig
 	Deploy        config.DeployConfig
 	Notify        notify.Sender
@@ -268,6 +270,7 @@ func pipeline(deps Deps, buildID string, repo config.Repository, branch, sha, ta
 			Workspace:    deps.Workspace,
 			Registry:     deps.Registry,
 			Build:        deps.Build,
+			Mirrors:      deps.Network.Get(ctx),
 			CloneTimeout: deps.Timeouts.CloneDuration(),
 			BuildTimeout: deps.Timeouts.BuildDuration(),
 		})

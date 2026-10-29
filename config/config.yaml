@@ -52,6 +52,22 @@ code:
       domains: ["gitee.com"]
       token: "${GITEE_TOKEN:-}"
 
+# 构建下载源（可选）。auto 自动探测国内/国外并选择镜像源。
+network:
+  region: auto
+  probe_timeout: "3s"
+  cache_ttl: "10m"
+  # 留空 = 使用 region 默认值；填写则强制覆盖
+  goproxy: ""
+  gosumdb: ""
+  npm_registry: ""
+  maven_mirror: ""
+  gradle_mirror: ""
+  cargo_registry: ""
+  # 只填主机名，例如 mirrors.aliyun.com
+  apk_mirror: ""
+  apt_mirror: ""
+
 # 各步骤超时（可选）；省略时使用下面默认值
 timeouts:
   clone: "15m"
@@ -76,6 +92,16 @@ build:
   labels: {}
   # docker build --cache-from 列表
   cache_from: []
+  # 技术栈版本（留空自动检测）
+  stack:
+    # 留空 = 自动检测（Go 读取 go.mod；其他语言使用模板默认值）
+    go_version: ""
+    rust_version: ""
+    java_version: ""
+    java_min_version: "8"
+    node_version: ""
+    package_manager: "auto"
+    cgo_enabled: false
 
 # 镜像推送（可选）。不写或 url 为空 = 只构建本地镜像。
 registry:
@@ -87,22 +113,24 @@ registry:
 # 构建后本机部署（可选）。
 deploy:
   enabled: false
-  # 自动发现根目录：标准布局 <root>/<repo_name>/docker-compose.yml
-  # 也可用 <root>/<namespace>/<repo_name>/... 或 <root>/<owner/repo>/...
-  root: "/data/services"
+  # 可选：自动发现根目录（仅当服务别名等于仓库名时）。
+  # 服务别名不等于仓库名时留空，使用下方 targets 映射。
+  root: ""
   compose_files: ["docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"]
-  # 使用 compose --wait 等待容器 running/healthy
-  wait: true
+  # 可选：等待容器 running/healthy（默认关闭）
+  wait: false
   wait_timeout: "120s"
   # never / missing / always；默认 never，禁止部署时拉取旧镜像
   pull: "never"
-  remove_orphans: true
+  # 默认关闭，避免清理 compose 之外的同项目容器
+  remove_orphans: false
 
-  # 显式登记（可选，优先于自动发现）。key 可以是 repo_name 或 owner/repo。
+  # 显式登记（服务别名 != 仓库名时使用；优先于自动发现）。
+  # key = 仓库名或 owner/repo；dir = 实际服务别名目录。
   # targets:
   #   atlas-market:
-  #     dir: "/data/services/atlas-market"
-  #     compose_file: ""          # 留空自动探测
+  #     dir: "/data/services/order-service"
+  #     compose_file: "docker-compose.yaml"
   #     service: ""               # 留空启动整个 compose
   #     project_name: ""          # 可选 compose 项目名
   #     env:                      # 额外传给 compose 的环境变量

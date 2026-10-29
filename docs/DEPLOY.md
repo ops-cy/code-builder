@@ -2,7 +2,7 @@
 
 ## 前置要求
 
-- 构建机已安装 Docker 20+ 与 Docker Compose v2.17+（部署使用 `--wait` / `--pull never`）
+- 构建机已安装 Docker 20+ 与 Docker Compose v2（如需 `wait: true`，建议 Compose 2.17+）
 - 构建机可访问 GitLab / GitHub / Gitee
 - 私有仓库已添加只读 Deploy Key，或配置平台 HTTPS token
 - 被构建仓库根目录有 `Dockerfile`，或包含可识别语言标记（Go / Rust / Maven / Gradle / Node / Vue）
@@ -57,63 +57,69 @@ docker compose up -d --build
 
 ## 自动部署
 
-标准布局无需配置 targets：
+当前部署方式：
 
-```
-/data/services/<repo_name>/docker-compose.yml
+```text
+/data/services/{服务别名}/docker-compose.yaml
 ```
 
-也支持：
-
-```
-/data/services/<namespace>/<repo_name>/docker-compose.yml
-/data/services/<owner>/<repo>/docker-compose.yml
-```
+服务别名不等于仓库名时，用 `deploy.targets` 做映射：
 
 ```yaml
 deploy:
   enabled: true
-  root: "/data/services"
   compose_files: ["docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"]
-  wait: true
+  wait: false
   wait_timeout: "120s"
   pull: "never"
-  remove_orphans: true
-```
-
-执行命令：
-
-```bash
-docker compose -f <compose> up -d \
-  --no-build \
-  --pull never \
-  --remove-orphans \
-  --wait --wait-timeout 120s \
-  [service]
-```
-
-- **不 pull、不 build**：只使用刚构建出的本地镜像。
-- **--wait**：等待容器 running/healthy，避免“命令成功但服务没起来”。
-- 失败时自动收集 `compose ps` 和 `compose logs --tail=100`，写入构建日志和飞书卡片。
-- 同一目录的部署在进程内串行。
-- compose 可直接引用 `${BUILDER_IMAGE}`、`${BUILDER_TAG}`、`${BUILDER_SHA}`、`${BUILDER_BRANCH}`、`${BUILDER_REPO}`、`${BUILDER_PROVIDER}`。
-
-### 显式 targets
-
-```yaml
-deploy:
-  enabled: true
+  remove_orphans: false
   targets:
-    acme/atlas-market:                 # 优先按 owner/repo 匹配
-      dir: "/data/services/atlas-market"
-      compose_file: ""                 # 留空自动探测
-      service: "api"
+    atlas-market:                         # 仓库名或 owner/repo
+      dir: "/data/services/order-service" # 服务别名目录
+      compose_file: "docker-compose.yaml"
+      service: ""                         # 留空启动整个 compose
       project_name: ""
       env:
         APP_ENV: "prod"
 ```
 
-匹配顺序：`owner/repo` → `repo_name` → 自动发现。显式 target 优先。
+执行命令：
+
+```bash
+docker compose -f <compose> up -d --no-build --pull never [service]
+```
+
+- **不 pull、不 build**：只使用刚构建出的本地镜像。
+- `wait` / `remove_orphans` 默认关闭，需要时显式开启。
+- 失败时自动收集 `compose ps` 和 `compose logs --tail=100`，写入构建日志和飞书卡片。
+- 同一目录的部署在进程内串行。
+- compose 可直接引用 `${BUILDER_IMAGE}`、`${BUILDER_TAG}`、`${BUILDER_SHA}`、`${BUILDER_BRANCH}`、`${BUILDER_REPO}`、`${BUILDER_PROVIDER}`。
+
+### 一个镜像启动多个服务
+
+运行镜像的 entrypoint 支持 `COMMAND`，也支持 compose `command` 参数：
+
+```yaml
+services:
+  api:
+    image: ${BUILDER_IMAGE}
+    command: ["--role=api"]
+
+  worker:
+    image: ${BUILDER_IMAGE}
+    command: ["--role=worker"]
+
+  job:
+    image: ${BUILDER_IMAGE}
+    environment:
+      COMMAND: "/app/app --role=job"
+```
+
+这样构建一次镜像，部署阶段启动多个不同命令的容器。
+
+### 匹配顺序
+
+`owner/repo` → `repo_name` → `deploy.root` 自动发现。显式 target 优先。
 
 ### 部署失败
 
@@ -124,6 +130,28 @@ deploy:
 - `DeployOutput`：`compose ps` 与最近容器日志
 
 飞书成功卡片标题会变为 `⚠️ 构建成功，部署失败`。
+
+## 下载源
+
+```yaml
+network:
+  region: auto
+  probe_timeout: "3s"
+  cache_ttl: "10m"
+  # 留空使用区域默认值
+  goproxy: ""
+  npm_registry: ""
+  maven_mirror: ""
+  gradle_mirror: ""
+  cargo_registry: ""
+  apk_mirror: ""
+  apt_mirror: ""
+```
+
+- `auto` 自动探测国内 / 国外。
+- `cn` / `global` 可强制指定。
+- 单项非空时覆盖自动结果。
+- Docker 基础镜像加速由宿主机 `/etc/docker/daemon.json` 维护，本服务不配置。
 
 ## 安全
 

@@ -1,17 +1,24 @@
 # syntax=docker/dockerfile:1
-# Vue / React / Svelte / Angular 等前端：调用内置 build-node.sh 构建，
-# 产物 dist/ 交给 nginx 托管。运行镜像保留 shell，便于 docker exec。
-FROM node:22-alpine AS build
+# Vue / React / Svelte / Angular 等前端：构建后交给 nginx 托管。
+ARG BASE_REGISTRY=
+ARG NODE_VERSION=22
+FROM ${BASE_REGISTRY}library/node:${NODE_VERSION}-alpine AS build
+ARG NODE_VERSION=22
 ARG NPM_REGISTRY=
-ENV NPM_CONFIG_REGISTRY=${NPM_REGISTRY}
-RUN apk add --no-cache bash git
+ARG APK_MIRROR=
+ARG PACKAGE_MANAGER=auto
+RUN if [ -n "$APK_MIRROR" ]; then sed -i "s#dl-cdn.alpinelinux.org#$APK_MIRROR#g" /etc/apk/repositories; fi \
+    && apk add --no-cache bash git
+RUN if [ -n "$NPM_REGISTRY" ]; then npm config set registry "$NPM_REGISTRY"; fi
 WORKDIR /app
 COPY . .
-RUN bash .code-builder/build.sh lts auto
+RUN bash .code-builder/build.sh "${NODE_VERSION}" "${PACKAGE_MANAGER}"
 
-FROM nginx:1.27-alpine AS runtime
+FROM ${BASE_REGISTRY}library/nginx:1.27-alpine AS runtime
+ARG APK_MIRROR=
 ARG TZ=Asia/Shanghai
-RUN apk add --no-cache ca-certificates tzdata curl
+RUN if [ -n "$APK_MIRROR" ]; then sed -i "s#dl-cdn.alpinelinux.org#$APK_MIRROR#g" /etc/apk/repositories; fi \
+    && apk add --no-cache ca-certificates tzdata curl
 ENV TZ=${TZ}
 COPY --from=build /app/dist /usr/share/nginx/html
 EXPOSE 80

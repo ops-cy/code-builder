@@ -96,10 +96,10 @@ func Describe(t config.DeployTarget, candidates []string) (Target, error) {
 		Service:       t.Service,
 		ProjectName:   t.ProjectName,
 		Env:           t.Env,
-		Wait:          true,
+		Wait:          false,
 		WaitTimeout:   "120s",
 		Pull:          "never",
-		RemoveOrphans: true,
+		RemoveOrphans: false,
 	}, nil
 }
 
