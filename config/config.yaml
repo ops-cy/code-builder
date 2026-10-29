@@ -229,16 +229,11 @@ deploy:
   #       dir: "/data/services/order-service"
   #       compose_file: "docker-compose.yaml"
   #       service: ""
-  #       project_name: ""
-  #       env:
-  #         APP_ENV: "prod"
   targets:
     # atlas-market:
     #   dir: "/data/services/order-service"
     #   compose_file: "docker-compose.yaml"
     #   service: ""
-    #   env:
-    #     APP_ENV: "prod"
 
 # 流水线通知（可选）。
 notify:

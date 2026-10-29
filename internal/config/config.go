@@ -313,11 +313,9 @@ type DeployConfig struct {
 
 // DeployTarget 是构建后启动的一个服务目录。
 type DeployTarget struct {
-	Dir         string            `yaml:"dir"`
-	ComposeFile string            `yaml:"compose_file"`
-	Service     string            `yaml:"service"`
-	ProjectName string            `yaml:"project_name"`
-	Env         map[string]string `yaml:"env"`
+	Dir         string `yaml:"dir"`
+	ComposeFile string `yaml:"compose_file"`
+	Service     string `yaml:"service"`
 	// Tag 仅为向后兼容而保留，且被忽略。
 	Tag string `yaml:"tag"`
 }
@@ -741,14 +739,6 @@ func (d DeployConfig) validate() error {
 		}
 		if t.Service != "" && !composeServicePattern.MatchString(t.Service) {
 			return fmt.Errorf("config: deploy.targets[%q].service %q is not a valid compose service name", name, t.Service)
-		}
-		if t.ProjectName != "" && !composeServicePattern.MatchString(t.ProjectName) {
-			return fmt.Errorf("config: deploy.targets[%q].project_name %q is not a valid compose project name", name, t.ProjectName)
-		}
-		for envKey := range t.Env {
-			if !envNamePattern.MatchString(envKey) {
-				return fmt.Errorf("config: deploy.targets[%q].env key %q is not a valid environment variable name", name, envKey)
-			}
 		}
 	}
 	return nil

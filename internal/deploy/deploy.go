@@ -40,10 +40,6 @@ type Target struct {
 	ComposeFiles []string
 	// Service 可选地将运行限定为单个 compose 服务。
 	Service string
-	// ProjectName 是可选的 compose 项目名。
-	ProjectName string
-	// Env 是传给 docker compose 的额外环境变量。
-	Env map[string]string
 	// Wait 为 true 时使用 compose --wait 等待容器健康。
 	Wait bool
 	// WaitTimeout 是 --wait-timeout 的值。
@@ -94,8 +90,6 @@ func Describe(t config.DeployTarget, candidates []string) (Target, error) {
 		ComposeFile:   filepath.Base(file),
 		ComposeFiles:  candidates,
 		Service:       t.Service,
-		ProjectName:   t.ProjectName,
-		Env:           t.Env,
 		Wait:          false,
 		WaitTimeout:   "120s",
 		Pull:          "never",
@@ -194,11 +188,7 @@ func logsArgs(file string, t Target) []string {
 }
 
 func composeBase(file string, t Target) []string {
-	args := []string{"compose", "-f", file}
-	if t.ProjectName != "" {
-		args = append(args, "--project-name", t.ProjectName)
-	}
-	return args
+	return []string{"compose", "-f", file}
 }
 
 func pullValue(p string) string {
@@ -314,9 +304,6 @@ func deployEnv(req Request, base []string) []string {
 		"BUILDER_FULL_NAME="+req.FullName,
 		"BUILDER_PROVIDER="+req.Provider,
 	)
-	for k, v := range req.Target.Env {
-		env = append(env, k+"="+v)
-	}
 	return env
 }
 

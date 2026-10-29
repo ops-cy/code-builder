@@ -85,9 +85,6 @@ deploy:
       dir: "/data/services/order-service" # 服务别名目录
       compose_file: "docker-compose.yaml"
       service: ""                         # 留空启动整个 compose
-      project_name: ""
-      env:
-        APP_ENV: "prod"
 ```
 
 执行命令：
