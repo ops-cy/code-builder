@@ -8,6 +8,6 @@
 /data/
 /logs/
 /secrets/
-/.env
+
 code-builder
 code-builder.exe
