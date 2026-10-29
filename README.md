@@ -36,9 +36,11 @@ ssh-keygen -t ed25519 -f ./secrets/deploy_key -N ""
 # 公钥添加到各项目：GitLab Deploy Keys / GitHub Deploy keys / Gitee 部署公钥，勾选只读
 
 # 2. 配置
-#    编辑 config/config.yaml，至少填写 code.providers 中平台的 domains
-export WEBHOOK_SECRET="$(openssl rand -hex 32)"
-export DEPLOY_KEY_PATH="/run/secrets/deploy_key"   # 可选
+#    敏感变量放在 .env（Webhook Secret、token、密码）
+cp .env.example .env
+#    编辑 .env，至少设置 WEBHOOK_SECRET
+#    编辑 config/config.yaml，填写平台 domains、分支、deploy 等
+#    使用 SSH 时在 config.yaml 设置 code.deploy_key_path: "/run/secrets/deploy_key"
 
 # 3. 启动（compose 内含 build，可直接构建服务镜像）
 docker compose up -d --build
@@ -195,17 +197,27 @@ Webhook 响应：
 | 404 | 平台未启用 |
 | 503 `queue_full` | 队列已满 |
 
-## 环境变量
+## 环境变量（.env）
+
+`docker-compose.yml` 通过 `env_file: .env` 注入，以下变量只放 `.env`，不再散落在 compose 文件里：
 
 | 变量 | 必填 | 说明 |
 |---|---|---|
 | `WEBHOOK_SECRET` | 是 | 三个平台共用的 Webhook Secret |
-| `DEPLOY_KEY_PATH` | 否 | 全局 SSH Deploy Key 私钥路径；旧名 `GITLAB_DEPLOY_KEY_PATH` 仍兼容 |
 | `GITLAB_TOKEN` / `GITHUB_TOKEN` / `GITEE_TOKEN` | 否 | 平台 HTTPS clone token（私有仓库） |
 | `REGISTRY_PASSWORD` | 否 | `registry.password` 引用 |
 | `LARK_WEBHOOK_URL` / `LARK_SECRET` | 否 | 飞书机器人 |
-| `LOG_LEVEL` | 否 | `debug` / `info`（默认）/ `warn` / `error` |
+| `LOG_LEVEL` | 否 | 临时覆盖 `server.log_level` |
 | `TZ` | 否 | 默认 `Asia/Shanghai` |
+
+非敏感配置全部在 `config/config.yaml`，包括：
+
+- `server.log_level`、队列、并发
+- 分支白名单、平台域名
+- 下载源 `network`
+- 标签、Java/Node/Go/Rust 版本
+- 部署映射 `deploy.targets`
+- 镜像推送、通知开关
 
 ## 文档
 

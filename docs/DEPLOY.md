@@ -14,7 +14,9 @@ code-builder/
 ├── docker-compose.yml        # 服务编排（build、docker.sock、配置、secrets、工作区、日志、服务目录）
 ├── Dockerfile                # 服务镜像（git / openssh-client / docker-cli / compose / tini）
 ├── config/
-│   └── config.yaml           # 服务配置
+│   └── config.yaml           # 全部非敏感配置
+├── .env                      # 敏感变量（从 .env.example 复制，不提交）
+├── .env.example              # 敏感变量示例
 ├── secrets/                  # SSH Deploy Key 私钥目录（只读挂载，需自建）
 │   └── deploy_key
 ├── data/                     # clone 工作区（构建后自动清理）
@@ -25,9 +27,11 @@ code-builder/
 ## 启动
 
 ```bash
-export WEBHOOK_SECRET="$(openssl rand -hex 32)"
-export DEPLOY_KEY_PATH="/run/secrets/deploy_key"   # 可选
-export GITHUB_TOKEN="..."                          # 可选
+cp .env.example .env
+# 编辑 .env，至少设置 WEBHOOK_SECRET
+# 编辑 config/config.yaml，填写 domains / branches / deploy 等
+# 使用 SSH 时在 config.yaml 设置 code.deploy_key_path: "/run/secrets/deploy_key"
+
 docker compose up -d --build
 docker compose logs -f code-builder
 ```
@@ -43,17 +47,20 @@ docker compose up -d --build
 
 构建记录已持久化到 `logs/builds.json`；队列仍在内存中，升级会中断未完成任务，重新 Push 即可。
 
-## 环境变量
+## 环境变量（.env）
+
+`docker-compose.yml` 使用 `env_file: .env`，以下变量只放 `.env`：
 
 | 变量 | 必填 | 说明 |
 |---|---|---|
 | `WEBHOOK_SECRET` | 是 | 三个平台共用 Webhook Secret |
-| `DEPLOY_KEY_PATH` | 否 | 全局 SSH Deploy Key；旧名 `GITLAB_DEPLOY_KEY_PATH` 兼容 |
 | `GITLAB_TOKEN` / `GITHUB_TOKEN` / `GITEE_TOKEN` | 否 | 平台 HTTPS clone token |
 | `REGISTRY_PASSWORD` | 否 | 镜像仓库密码 |
 | `LARK_WEBHOOK_URL` / `LARK_SECRET` | 否 | 飞书机器人 |
-| `LOG_LEVEL` | 否 | `debug` / `info` / `warn` / `error` |
+| `LOG_LEVEL` | 否 | 临时覆盖 `server.log_level` |
 | `TZ` | 否 | 默认 `Asia/Shanghai` |
+
+其余配置均在 `config/config.yaml`：监听、日志级别、分支、平台域名、下载源、标签、语言版本、部署 targets、通知开关等。
 
 ## 自动部署
 

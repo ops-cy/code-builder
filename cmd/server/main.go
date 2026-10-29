@@ -39,6 +39,11 @@ func main() {
 		logger.Error("load config", slog.Any("err", err))
 		os.Exit(1)
 	}
+	// config.yaml 是日志级别的主配置；环境变量 LOG_LEVEL 仍可作为临时覆盖。
+	if os.Getenv("LOG_LEVEL") == "" {
+		_ = level.UnmarshalText([]byte(cfg.Server.LogLevel))
+		logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
+	}
 	if err := os.MkdirAll(cfg.Server.Workspace, 0o755); err != nil {
 		logger.Error("create workspace", slog.Any("err", err))
 		os.Exit(1)
@@ -55,7 +60,10 @@ func main() {
 
 	// 每次 clone 可选使用的 SSH 部署密钥（不在 YAML 配置文件中）：
 	// 若已配置但无法访问，则在启动时快速失败。
-	deployKey := os.Getenv("DEPLOY_KEY_PATH")
+	deployKey := cfg.Code.DeployKeyPath
+	if deployKey == "" {
+		deployKey = os.Getenv("DEPLOY_KEY_PATH")
+	}
 	if deployKey == "" {
 		deployKey = os.Getenv("GITLAB_DEPLOY_KEY_PATH")
 	}

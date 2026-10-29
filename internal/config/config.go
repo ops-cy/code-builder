@@ -52,6 +52,7 @@ type ServerConfig struct {
 	StateFile   string `yaml:"state_file"`
 	QueueSize   int    `yaml:"queue_size"`
 	Concurrency int    `yaml:"concurrency"`
+	LogLevel    string `yaml:"log_level"`
 }
 
 // 支持的代码托管平台。
@@ -73,6 +74,8 @@ type CodeConfig struct {
 	Domain string `yaml:"domain"`
 	// Domains 是所有平台共用的域名白名单；平台内 domains 可覆盖它。
 	Domains []string `yaml:"domains"`
+	// DeployKeyPath 是全局 SSH Deploy Key 在容器内的路径；留空表示不使用 SSH key。
+	DeployKeyPath string `yaml:"deploy_key_path"`
 	// Branches 是触发构建的分支白名单；支持精确名称和 path.Match 通配符。
 	Branches []string `yaml:"branches"`
 	// Providers 按平台配置启用状态、域名和可选的 HTTPS clone token。
@@ -507,6 +510,9 @@ func (c *Config) applyDefaults() {
 	if c.Server.Concurrency <= 0 {
 		c.Server.Concurrency = 2
 	}
+	if c.Server.LogLevel == "" {
+		c.Server.LogLevel = "info"
+	}
 	if len(c.Code.Branches) == 0 {
 		c.Code.Branches = []string{"main", "master"}
 	}
@@ -583,6 +589,11 @@ func (c Config) validate() error {
 	}
 	if c.Server.QueueSize < 1 {
 		return fmt.Errorf("config: server.queue_size must be >= 1")
+	}
+	switch strings.ToLower(c.Server.LogLevel) {
+	case "debug", "info", "warn", "error":
+	default:
+		return fmt.Errorf("config: server.log_level %q must be debug, info, warn or error", c.Server.LogLevel)
 	}
 	for _, b := range c.Code.Branches {
 		if strings.TrimSpace(b) == "" {

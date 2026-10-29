@@ -1,148 +1,260 @@
-# 多平台代码构建服务 — 配置示例
+# 多平台代码构建服务 — 配置说明
 #
-# 支持 GitLab / GitHub / Gitee。仓库无需登记：只要事件中的仓库地址属于
-# 对应平台配置的域名，且分支命中白名单，就会自动构建。
+# 配置文件负责所有“非敏感”的行为配置；
+# Webhook Secret、平台 token、仓库密码、飞书密钥等敏感值放在 .env，
+# 由 docker-compose.yml 的 env_file 注入，再在这里用 ${VAR} 引用。
 #
-# 所有平台共用同一个 Webhook Secret（GitLab 的 Secret token、GitHub 的
-# Webhook secret、Gitee 的 Webhook 密码填同一个值）。
-#
-# ${VAR} 在启动时从环境变量展开；${VAR:-} 表示变量可缺省为空。
+# 首次启动：
+#   cp .env.example .env
+#   编辑 .env
+#   编辑本文件中的 domains / branches / deploy 等配置
+#   docker compose up -d --build
 
 server:
-  # HTTP 监听地址
+  # HTTP 监听地址。docker-compose 端口映射固定为 8080:8080，
+  # 如需修改监听端口，请同时修改 docker-compose.yml 的 ports。
   listen: ":8080"
-  # git clone 工作区（容器内路径，按仓库+构建任务隔离子目录）
+
+  # clone 工作区（容器内路径），每次构建后自动清理
   workspace: "/app/workspace"
-  # 构建日志与构建记录存放目录
+
+  # 构建日志与构建记录目录
   logs_dir: "/app/logs"
-  # 构建记录持久化文件；省略时默认为 <logs_dir>/builds.json
+
+  # 构建记录持久化文件；省略时默认 <logs_dir>/builds.json
   state_file: "/app/logs/builds.json"
-  # 待处理任务队列上限，超过后 webhook 返回 503
+
+  # 待处理任务队列上限；超过后 Webhook 返回 503
   queue_size: 10
-  # 全局并行构建数；同一仓库的任务始终串行执行
+
+  # 全局并行构建数；同一仓库的任务始终串行
   concurrency: 2
 
+  # 日志级别：debug / info / warn / error
+  log_level: "info"
+
 code:
-  # 全局 Webhook Secret（必填）。三个平台填同一个值。
-  webhook_secret: "${WEBHOOK_SECRET:-}"
-  # 触发分支白名单：精确名称或 glob（release/*）
+  # 必填：三个平台共用的 Webhook Secret。
+  # 在 .env 中设置 WEBHOOK_SECRET，三个平台 Webhook 都填同一个值。
+  webhook_secret: "${WEBHOOK_SECRET}"
+
+  # 可选：全局 SSH Deploy Key 的容器内路径。
+  # 使用 SSH 拉取私有仓库时填写，例如：
+  #   deploy_key_path: "/run/secrets/deploy_key"
+  # 留空表示不使用 Deploy Key（可改用平台 token）。
+  deploy_key_path: ""
+
+  # 触发构建的分支白名单，支持精确名称和 glob：
+  #   main / master / release/* / feature/* / v1.*
   branches:
     - "main"
     - "master"
-    - "release/*"
 
-  # 平台配置。省略整个 providers 段时，旧配置 code.domain + code.webhook_secret
-  # 等价于只启用 GitLab。
+  # 平台配置。只需要保留实际使用的平台，其他平台可 enabled: false。
   providers:
     gitlab:
       enabled: true
-      # 允许接入的 GitLab 域名（GitLab.com 或自建实例域名）
-      domains: ["code.gitlab.com"]
-      # 可选：HTTPS 私有仓库 clone token（配置后优先使用 HTTPS；留空则用 Deploy Key/SSH）
+      # 允许接入的 GitLab 域名。GitLab.com 填 github.com 之外的实际域名；
+      # 自建实例填例如 code.example.com（不要带 https://）。
+      domains:
+        - "code.gitlab.com"
+      # 可选：GitLab HTTPS clone token（私有仓库）。
+      # 在 .env 中设置 GITLAB_TOKEN；使用 Deploy Key 时可留空。
       token: "${GITLAB_TOKEN:-}"
 
     github:
       enabled: true
-      # GitHub.com 用 github.com；GitHub Enterprise 填企业域名
-      domains: ["github.com"]
+      # GitHub.com 填 github.com；GitHub Enterprise 填企业域名。
+      domains:
+        - "github.com"
+      # 可选：GitHub HTTPS clone token（私有仓库）。
       token: "${GITHUB_TOKEN:-}"
 
     gitee:
       enabled: true
-      domains: ["gitee.com"]
+      # Gitee 填 gitee.com；企业版填实际域名。
+      domains:
+        - "gitee.com"
+      # 可选：Gitee HTTPS clone token（私有仓库）。
       token: "${GITEE_TOKEN:-}"
 
-# 构建下载源（可选）。auto 自动探测国内/国外并选择镜像源。
+# 构建下载源。
+# region: auto 自动探测国内/国外；cn 强制国内；global 强制官方源。
+# 下面的单项留空表示使用 region 默认值；填写后强制覆盖。
 network:
-  region: auto
+  region: "auto"
   probe_timeout: "3s"
   cache_ttl: "10m"
-  # 留空 = 使用 region 默认值；填写则强制覆盖
+
+  # Go 模块代理；国内默认 https://goproxy.cn,direct
   goproxy: ""
+  # Go 校验数据库；一般保持空，使用区域默认值
   gosumdb: ""
+
+  # NPM / pnpm / yarn 包源；国内默认 https://registry.npmmirror.com
   npm_registry: ""
+
+  # Maven / Gradle 依赖镜像；国内默认阿里云 public
   maven_mirror: ""
   gradle_mirror: ""
+
+  # Rust crates 源；国内默认 sparse+https://rsproxy.cn/index/
   cargo_registry: ""
-  # 只填主机名，例如 mirrors.aliyun.com
+
+  # Alpine / Debian / Ubuntu 系统包镜像，只填主机名：
+  #   国内默认 mirrors.aliyun.com
+  #   留空使用官方源
   apk_mirror: ""
   apt_mirror: ""
 
-# 各步骤超时（可选）；省略时使用下面默认值
+# 各步骤超时。值为 Go duration，例如 90s / 15m / 1h。
 timeouts:
   clone: "15m"
   build: "25m"
   job: "30m"
   deploy: "5m"
 
-# 镜像 Tag 策略（可选）。默认 latest。
 build:
-  # 所有分支的默认 tag
+  # 所有分支的默认镜像标签。留空 = latest。
+  # 例如填 "stable"，则所有分支默认产出 app:stable。
   tag: ""
-  # 按分支覆盖 tag，优先级高于 build.tag
-  branch_tags: {}
-  # 额外产出 sha-<短SHA> 标签
+
+  # 按分支精确覆盖 tag（不支持 glob），优先级高于 build.tag。
+  # 只写需要特殊标签的分支；未列出的分支使用 build.tag 或 latest。
+  # 示例：
+  #   branch_tags:
+  #     main: "stable"
+  #     pre: "latest"
+  #     develop: "dev"
+  # 上面配置的效果：
+  #   main 分支       -> app:stable
+  #   pre 分支        -> app:latest
+  #   develop 分支    -> app:dev
+  #   其他分支        -> app:latest（因为 build.tag 为空）
+  branch_tags:
+    # main: "stable"
+    # pre: "latest"
+    # develop: "dev"
+
+  # 额外产出 sha-<短SHA> 标签，便于回滚指定提交
   sha_tag: false
-  # docker build --platform，例如 linux/amd64；留空使用宿主默认
+
+  # docker build --platform，例如 linux/amd64、linux/arm64。
+  # 留空使用构建机默认架构。
   platform: ""
-  # docker build --pull
+
+  # docker build --pull：是否强制拉取最新基础镜像
   pull: false
-  # 额外 build-arg / label
+
+  # 额外 build-arg。优先级最高，会覆盖自动检测值。
+  # 示例：
+  #   args:
+  #     GOPROXY: "https://goproxy.cn,direct"
+  #     NPM_REGISTRY: "https://registry.npmmirror.com"
   args: {}
+
+  # 额外镜像 label
+  # 示例：
+  #   labels:
+  #     maintainer: "devops@example.com"
   labels: {}
+
   # docker build --cache-from 列表
+  # 示例：
+  #   cache_from:
+  #     - "registry.example.com/tenants/app:latest"
   cache_from: []
-  # 技术栈版本（留空自动检测）
+
+  # 技术栈版本。留空 = 自动检测。
   stack:
-    # 留空 = 自动检测（Go 读取 go.mod；其他语言使用模板默认值）
+    # Go 版本；留空读取 go.mod 的 go 指令
     go_version: ""
+    # Rust 版本；留空默认 1.83
     rust_version: ""
+    # Java 版本；留空从 pom.xml / build.gradle 检测，支持 8/11/17/21
     java_version: ""
+    # Java 最低版本；检测值低于它时升级到该版本
     java_min_version: "8"
+    # Node 主版本；留空从 package.json 的 volta.node / engines.node 检测，支持 18/20/22/24
     node_version: ""
+    # 包管理器：auto / npm / pnpm / yarn / bun
     package_manager: "auto"
+    # Go 是否启用 CGO
     cgo_enabled: false
 
-# 镜像推送（可选）。不写或 url 为空 = 只构建本地镜像。
+# 镜像推送（可选）。
+# url 留空 = 只构建本地镜像，不推送。
 registry:
+  # 镜像仓库地址，例如 registry.example.com
   url: ""
+  # 可选镜像名前缀 / 命名空间，例如 tenants
   project: ""
+  # 用户名和密码必须成对出现；都留空表示不执行 docker login。
+  # 密码建议在 .env 中通过 REGISTRY_PASSWORD 提供。
   username: ""
   password: "${REGISTRY_PASSWORD:-}"
 
 # 构建后本机部署（可选）。
+# 你的部署目录是 /data/services/{服务别名}/docker-compose.yaml，
+# 服务别名和仓库名不一致时，用 targets 做映射。
 deploy:
   enabled: false
-  # 可选：自动发现根目录（仅当服务别名等于仓库名时）。
-  # 服务别名不等于仓库名时留空，使用下方 targets 映射。
+
+  # 可选：自动发现根目录。仅当服务别名等于仓库名时使用。
+  # 服务别名不等于仓库名时留空，使用下方 targets。
   root: ""
-  compose_files: ["docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"]
-  # 可选：等待容器 running/healthy（默认关闭）
+
+  # compose 文件探测顺序；targets[].compose_file 留空时使用。
+  compose_files:
+    - "docker-compose.yml"
+    - "docker-compose.yaml"
+    - "compose.yml"
+    - "compose.yaml"
+
+  # 是否等待容器 running/healthy；默认关闭，只执行 up -d。
   wait: false
   wait_timeout: "120s"
-  # never / missing / always；默认 never，禁止部署时拉取旧镜像
+
+  # 部署时是否拉取镜像：never / missing / always。
+  # 保持 never，确保使用刚构建出的本地镜像。
   pull: "never"
-  # 默认关闭，避免清理 compose 之外的同项目容器
+
+  # 是否清理 compose 中已删除的服务；默认关闭。
   remove_orphans: false
 
-  # 显式登记（服务别名 != 仓库名时使用；优先于自动发现）。
-  # key = 仓库名或 owner/repo；dir = 实际服务别名目录。
-  # targets:
-  #   atlas-market:
-  #     dir: "/data/services/order-service"
-  #     compose_file: "docker-compose.yaml"
-  #     service: ""               # 留空启动整个 compose
-  #     project_name: ""          # 可选 compose 项目名
-  #     env:                      # 额外传给 compose 的环境变量
-  #       APP_ENV: "prod"
+  # 显式映射。key = 仓库名或 owner/repo；dir = 实际服务别名目录。
+  # 示例：
+  #   targets:
+  #     atlas-market:
+  #       dir: "/data/services/order-service"
+  #       compose_file: "docker-compose.yaml"
+  #       service: ""
+  #       project_name: ""
+  #       env:
+  #         APP_ENV: "prod"
+  targets:
+    # atlas-market:
+    #   dir: "/data/services/order-service"
+    #   compose_file: "docker-compose.yaml"
+    #   service: ""
+    #   env:
+    #     APP_ENV: "prod"
 
-# 流水线通知（可选）
+# 流水线通知（可选）。
 notify:
+  # 是否启用飞书通知
   enabled: false
+
+  # 各事件开关
   on_started: true
   on_success: true
   on_failure: true
+
   lark:
-    webhook_url: ""
-    secret: ""
+    # 飞书机器人 Webhook。建议在 .env 中设置 LARK_WEBHOOK_URL，
+    # 这里保持空字符串即可。
+    webhook_url: "${LARK_WEBHOOK_URL:-}"
+    # 机器人开启“签名校验”时填写；建议在 .env 中设置 LARK_SECRET。
+    secret: "${LARK_SECRET:-}"
+    # 单次投递超时
     timeout: "10s"
