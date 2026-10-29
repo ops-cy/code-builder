@@ -1,4 +1,4 @@
-module gitlab-builder
+module code-builder
 
 go 1.24.1
 

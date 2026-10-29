@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"time"
 
-	"gitlab-builder/internal/config"
+	"code-builder/internal/config"
 )
 
 // Event 是触发通知的流水线事件。

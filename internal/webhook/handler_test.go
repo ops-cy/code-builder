@@ -15,11 +15,11 @@ import (
 	"testing"
 	"time"
 
-	"gitlab-builder/internal/config"
-	"gitlab-builder/internal/deploy"
-	"gitlab-builder/internal/notify"
-	"gitlab-builder/internal/queue"
-	"gitlab-builder/internal/store"
+	"code-builder/internal/config"
+	"code-builder/internal/deploy"
+	"code-builder/internal/notify"
+	"code-builder/internal/queue"
+	"code-builder/internal/store"
 
 	"github.com/gin-gonic/gin"
 )
@@ -38,7 +38,9 @@ func testRepo() config.Repository {
 func newTestDeps(t *testing.T, q *queue.Queue) Deps {
 	t.Helper()
 	return Deps{
-		Domain:    "example.com",
+		Providers: map[string]config.Provider{
+			config.ProviderGitLab: {Name: config.ProviderGitLab, Domains: []string{"example.com"}},
+		},
 		Branches:  []string{"main"},
 		Secret:    testSecret,
 		Store:     store.New(t.TempDir()),
@@ -51,7 +53,9 @@ func newTestDeps(t *testing.T, q *queue.Queue) Deps {
 func newRouter(deps Deps) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	r.POST("/webhook", Handler(deps))
+	h := Handler(deps)
+	r.POST("/webhook", h)
+	r.POST("/webhook/:provider", h)
 	return r
 }
 
@@ -563,9 +567,10 @@ func Test_notifyEvent_when_NilNotifier_thenSafe(t *testing.T) {
 // stubDeploy 为单个测试替换部署接缝。
 func stubDeploy(t *testing.T, up func(context.Context, deploy.Request) error, ps func(context.Context, deploy.Request) (string, error)) {
 	t.Helper()
-	oldUp, oldPs := deployUp, deployPs
+	oldUp, oldPs, oldLogs := deployUp, deployPs, deployLogs
 	deployUp, deployPs = up, ps
-	t.Cleanup(func() { deployUp, deployPs = oldUp, oldPs })
+	deployLogs = func(context.Context, deploy.Request) (string, error) { return "", nil }
+	t.Cleanup(func() { deployUp, deployPs, deployLogs = oldUp, oldPs, oldLogs })
 }
 
 func deployDeps(t *testing.T, cfg config.DeployConfig) (Deps, *store.Build, *bytes.Buffer) {

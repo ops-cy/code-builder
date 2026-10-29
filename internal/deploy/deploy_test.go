@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"code-builder/internal/config"
 )
 
 // TestHelperProcess 不是真正的测试：它是被打桩的 execCommand 启动的
@@ -56,26 +58,29 @@ func targetDir(t *testing.T) (string, string) {
 
 func Test_upArgs(t *testing.T) {
 	tests := []struct {
-		name    string
-		file    string
-		service string
-		want    []string
+		name string
+		tgt  Target
+		want []string
 	}{
 		{
 			name: "no service starts the whole file",
-			file: "/s/docker-compose.yaml",
-			want: []string{"compose", "-f", "/s/docker-compose.yaml", "up", "-d"},
+			tgt:  Target{ComposeFile: "docker-compose.yaml"},
+			want: []string{"compose", "-f", "docker-compose.yaml", "up", "-d", "--no-build", "--pull", "never"},
 		},
 		{
-			name:    "service is appended last",
-			file:    "/s/docker-compose.yaml",
-			service: "api",
-			want:    []string{"compose", "-f", "/s/docker-compose.yaml", "up", "-d", "api"},
+			name: "service is appended last",
+			tgt:  Target{ComposeFile: "docker-compose.yaml", Service: "api"},
+			want: []string{"compose", "-f", "docker-compose.yaml", "up", "-d", "--no-build", "--pull", "never", "api"},
+		},
+		{
+			name: "wait and orphans",
+			tgt:  Target{ComposeFile: "docker-compose.yaml", Wait: true, WaitTimeout: "60s", RemoveOrphans: true},
+			want: []string{"compose", "-f", "docker-compose.yaml", "up", "-d", "--no-build", "--pull", "never", "--remove-orphans", "--wait", "--wait-timeout", "60s"},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := upArgs(tt.file, tt.service)
+			got := upArgs(tt.tgt.ComposeFile, tt.tgt)
 			if strings.Join(got, " ") != strings.Join(tt.want, " ") {
 				t.Errorf("upArgs() = %v, want %v", got, tt.want)
 			}
@@ -84,10 +89,57 @@ func Test_upArgs(t *testing.T) {
 }
 
 func Test_psArgs(t *testing.T) {
-	got := psArgs("/s/docker-compose.yaml")
+	got := psArgs("/s/docker-compose.yaml", Target{})
 	want := []string{"compose", "-f", "/s/docker-compose.yaml", "ps"}
 	if strings.Join(got, " ") != strings.Join(want, " ") {
 		t.Errorf("psArgs() = %v, want %v", got, want)
+	}
+}
+
+func Test_TargetFromDir_when_ComposeFilePresent_thenDetected(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "compose.yml"), []byte("services: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tgt, ok := TargetFromDir(dir, []string{"docker-compose.yml", "compose.yml"})
+	if !ok {
+		t.Fatal("TargetFromDir() ok = false, want true")
+	}
+	if tgt.Dir != dir || tgt.ComposeFile != "compose.yml" {
+		t.Errorf("target = %+v", tgt)
+	}
+}
+
+func Test_Describe_when_ComposeFileEmpty_thenAutoDetected(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "docker-compose.yaml"), []byte("services: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tgt, err := Describe(config.DeployTarget{Dir: dir}, []string{"docker-compose.yaml"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tgt.ComposeFile != "docker-compose.yaml" {
+		t.Errorf("ComposeFile = %q", tgt.ComposeFile)
+	}
+}
+
+func Test_Up_when_ComposeFileEmpty_thenAutoDetects(t *testing.T) {
+	stubExec(t)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "compose.yaml"), []byte("services: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var log bytes.Buffer
+	err := Up(context.Background(), Request{
+		Target: Target{Dir: dir},
+		Log:    &log,
+	})
+	if err != nil {
+		t.Fatalf("Up() error = %v; log=%s", err, log.String())
+	}
+	if !strings.Contains(log.String(), "compose.yaml") {
+		t.Errorf("log = %s, want auto-detected compose.yaml", log.String())
 	}
 }
 
@@ -111,10 +163,10 @@ func Test_Up_when_ServiceEmpty_thenRunsWholeFile(t *testing.T) {
 	if !strings.Contains(out, "up -d") {
 		t.Errorf("log missing up -d: %q", out)
 	}
-	if !strings.Contains(out, "up -d (dir=") {
+	if !strings.Contains(out, "up -d --no-build") || !strings.Contains(out, "(dir="+dir+")") {
 		t.Errorf("log missing the directory-tagged up command: %q", out)
 	}
-	if strings.Contains(out, "up -d api") || strings.Contains(out, "up -d  ") {
+	if strings.Contains(out, "up -d --no-build --pull never api") {
 		t.Errorf("log appended a service for an empty service: %q", out)
 	}
 	if !strings.Contains(out, "cwd="+dir) {
@@ -138,7 +190,7 @@ func Test_Up_when_ServiceSet_thenAppendsService(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Up() error = %v", err)
 	}
-	if !strings.Contains(log.String(), "up -d api") {
+	if !strings.Contains(log.String(), "--pull never api") {
 		t.Errorf("log missing the service argument: %q", log.String())
 	}
 }

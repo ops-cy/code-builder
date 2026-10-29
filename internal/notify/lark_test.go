@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"gitlab-builder/internal/config"
+	"code-builder/internal/config"
 )
 
 func newTestNotifier(t *testing.T, url string, mutate func(*config.NotifyConfig)) *Notifier {

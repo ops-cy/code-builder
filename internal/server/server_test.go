@@ -9,10 +9,10 @@ import (
 	"strings"
 	"testing"
 
-	"gitlab-builder/internal/config"
-	"gitlab-builder/internal/queue"
-	"gitlab-builder/internal/store"
-	"gitlab-builder/internal/webhook"
+	"code-builder/internal/config"
+	"code-builder/internal/queue"
+	"code-builder/internal/store"
+	"code-builder/internal/webhook"
 
 	"go.uber.org/goleak"
 )

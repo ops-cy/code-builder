@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"gitlab-builder/internal/config"
-	"gitlab-builder/internal/gitx"
+	"code-builder/internal/config"
+	"code-builder/internal/gitx"
 )
 
 // Request 是解析后的构建输入。
@@ -21,11 +21,13 @@ type Request struct {
 	Repo      config.Repository
 	Branch    string
 	SHA       string
-	Tag       string // 解析后的镜像 tag（由配置驱动；未设置时为 sha8）
+	Tag       string // 解析后的镜像 tag（由配置驱动；未设置时为 latest）
 	Log       *os.File
 	Workspace string
 	// Registry 是可选的推送目标；当其 URL 为空时，镜像仅保留在本地。
 	Registry config.RegistryConfig
+	// Build 控制额外 tag、build args、labels、平台与缓存。
+	Build config.BuildConfig
 	// CloneTimeout / BuildTimeout 约束克隆和 docker build 步骤的时长；为零时沿用包内的默认值。
 	CloneTimeout time.Duration
 	BuildTimeout time.Duration
@@ -37,8 +39,8 @@ type Request struct {
 // 进度写入 req.Log：克隆耗时、所选 dockerfile 来源、docker 命令及其输出、最终镜像 tag。
 // 错误信息中绝不包含凭据（URL 会被掩码，registry 密码从不写入日志）。
 func Build(ctx context.Context, req Request) ([]string, error) {
-	fmt.Fprintf(req.Log, "==> clone start repo=%s url=%s branch=%s sha=%s\n",
-		req.Repo.Name, gitx.MaskURL(req.Repo.URL), req.Branch, req.SHA)
+	fmt.Fprintf(req.Log, "==> clone start provider=%s repo=%s url=%s branch=%s sha=%s\n",
+		req.Repo.Provider, req.Repo.Name, gitx.MaskURL(req.Repo.URL), req.Branch, req.SHA)
 
 	dest, err := workspaceDir(req.Workspace, req.Repo, req.SHA)
 	if err != nil {
@@ -73,8 +75,29 @@ func Build(ctx context.Context, req Request) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("builder: %w", err)
 	}
+	tags, pushRefs = addExtraTags(req, tags, pushRefs)
 	if len(pushRefs) > 0 {
 		fmt.Fprintf(req.Log, "==> registry push enabled remote=%s\n", pushRefs[0])
+	}
+
+	buildArgs := map[string]string{
+		"BUILD_SHA":     req.SHA,
+		"BUILD_BRANCH":  req.Branch,
+		"BUILD_TAG":     req.Tag,
+		"BUILD_DATE":    time.Now().UTC().Format(time.RFC3339),
+		"BUILD_VERSION": req.Tag,
+	}
+	for k, v := range req.Build.Args {
+		buildArgs[k] = v
+	}
+	labels := map[string]string{
+		"org.opencontainers.image.revision": req.SHA,
+		"org.opencontainers.image.created":  buildArgs["BUILD_DATE"],
+		"org.opencontainers.image.version":  req.Tag,
+		"org.opencontainers.image.source":   gitx.MaskURL(req.Repo.URL),
+	}
+	for k, v := range req.Build.Labels {
+		labels[k] = v
 	}
 
 	if err := dockerBuild(ctx, dockerBuildRequest{
@@ -83,6 +106,11 @@ func Build(ctx context.Context, req Request) ([]string, error) {
 		Tags:       tags,
 		PushRefs:   pushRefs,
 		Login:      login,
+		BuildArgs:  buildArgs,
+		Labels:     labels,
+		Platform:   req.Build.Platform,
+		Pull:       req.Build.Pull,
+		CacheFrom:  req.Build.CacheFrom,
 		Log:        req.Log,
 		Timeout:    req.BuildTimeout,
 	}); err != nil {
@@ -116,6 +144,35 @@ func imageRefs(image, tag string, reg config.RegistryConfig) (tags, pushRefs []s
 		}
 	}
 	return tags, pushRefs, login, nil
+}
+
+// addExtraTags 在 build.sha_tag 启用时追加 sha-<短SHA> 本地 / 远程标签。
+func addExtraTags(req Request, tags, pushRefs []string) ([]string, []string) {
+	if !req.Build.ShaTag || len(req.SHA) < 8 {
+		return tags, pushRefs
+	}
+	shaTag := "sha-" + req.SHA[:8]
+	local := req.Repo.Build.Image + ":" + shaTag
+	if !containsString(tags, local) {
+		tags = append(tags, local)
+	}
+	if req.Registry.Enabled() {
+		remote := req.Registry.RemoteRef(req.Repo.Build.Image, shaTag)
+		if !containsString(pushRefs, remote) {
+			tags = append(tags, remote)
+			pushRefs = append(pushRefs, remote)
+		}
+	}
+	return tags, pushRefs
+}
+
+func containsString(list []string, want string) bool {
+	for _, s := range list {
+		if s == want {
+			return true
+		}
+	}
+	return false
 }
 
 // workspaceDir 返回每个任务的克隆目录：

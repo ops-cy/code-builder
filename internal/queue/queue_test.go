@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"gitlab-builder/internal/config"
+	"code-builder/internal/config"
 	"go.uber.org/goleak"
 )
 

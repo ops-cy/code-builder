@@ -417,8 +417,8 @@ build:
 // Test_ExampleConfig_Loads 守护随附的 config/config.yaml：它必须保持
 // 可加载（YAML 合法、占位符可解析、默认值已应用）。
 func Test_ExampleConfig_Loads(t *testing.T) {
-	// 前提：示例配置引用了 ${GITLAB_WEBHOOK_SECRET}。
-	t.Setenv("GITLAB_WEBHOOK_SECRET", "example-secret")
+	// 前提：示例配置引用了 ${WEBHOOK_SECRET}。
+	t.Setenv("WEBHOOK_SECRET", "example-secret")
 
 	// 操作
 	cfg, err := Load(filepath.Join("..", "..", "config", "config.yaml"))
@@ -784,12 +784,6 @@ func Test_Load_when_DeployInvalid_thenError(t *testing.T) {
 `,
 		},
 		{
-			name: "missing compose file",
-			target: `    app:
-      dir: "{{DIR}}"
-`,
-		},
-		{
 			name: "compose file with path",
 			target: `    app:
       dir: "{{DIR}}"
@@ -828,6 +822,132 @@ func Test_Load_when_DeployTargetMissingFields_thenErrorMentionsTarget(t *testing
 	// 断言
 	if err == nil || !strings.Contains(err.Error(), "app") || !strings.Contains(err.Error(), "dir") {
 		t.Errorf("error = %v, want the app target's missing dir", err)
+	}
+}
+
+func Test_ResolveProviders_legacyConfigEnablesGitLabOnly(t *testing.T) {
+	path := writeConfig(t, `
+code:
+  webhook_secret: "x"
+  domain: "code.gitlab.com"
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	providers, err := cfg.Code.ResolveProviders()
+	if err != nil {
+		t.Fatalf("ResolveProviders() error = %v", err)
+	}
+	if len(providers) != 1 {
+		t.Fatalf("providers = %v, want GitLab only", providers)
+	}
+	p, ok := providers[ProviderGitLab]
+	if !ok || len(p.Domains) != 1 || p.Domains[0] != "code.gitlab.com" {
+		t.Errorf("gitlab provider = %+v", p)
+	}
+}
+
+func Test_ResolveProviders_multiPlatformSharedSecret(t *testing.T) {
+	t.Setenv("TEST_SHARED_SECRET", "shared")
+	t.Setenv("TEST_GITHUB_TOKEN", "gh-token")
+	path := writeConfig(t, `
+code:
+  webhook_secret: "${TEST_SHARED_SECRET}"
+  branches: ["main", "release/*"]
+  providers:
+    gitlab:
+      enabled: true
+      domains: ["gitlab.example.com"]
+    github:
+      enabled: true
+      domains: ["github.com"]
+      token: "${TEST_GITHUB_TOKEN}"
+    gitee:
+      enabled: false
+      domains: ["gitee.com"]
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	providers, err := cfg.Code.ResolveProviders()
+	if err != nil {
+		t.Fatalf("ResolveProviders() error = %v", err)
+	}
+	if len(providers) != 2 {
+		t.Fatalf("providers = %v, want gitlab + github", providers)
+	}
+	if providers[ProviderGitHub].Token != "gh-token" {
+		t.Errorf("github token = %q", providers[ProviderGitHub].Token)
+	}
+	if _, ok := providers[ProviderGitee]; ok {
+		t.Error("disabled gitee provider must not be returned")
+	}
+	if !cfg.Code.BranchAllowed("release/1.2") || cfg.Code.BranchAllowed("feature/x") {
+		t.Errorf("branch glob matching failed: %v", cfg.Code.Branches)
+	}
+}
+
+func Test_Load_when_UnknownProvider_thenError(t *testing.T) {
+	path := writeConfig(t, `
+code:
+  webhook_secret: "x"
+  providers:
+    bitbucket:
+      enabled: true
+      domains: ["bitbucket.org"]
+`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("Load() error = nil, want unknown provider error")
+	}
+}
+
+func Test_ExpandEnv_withOptionalDefault(t *testing.T) {
+	t.Setenv("TEST_SET_VAR", "value")
+	path := writeConfig(t, `
+code:
+  webhook_secret: "x"
+  domain: "example.com"
+  providers:
+    gitlab:
+      domains: ["example.com"]
+      token: "${TEST_SET_VAR:-fallback}"
+    github:
+      domains: ["github.com"]
+      token: "${TEST_UNSET_VAR:-}"
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Code.Providers["gitlab"].Token != "value" {
+		t.Errorf("gitlab token = %q, want env value", cfg.Code.Providers["gitlab"].Token)
+	}
+	if cfg.Code.Providers["github"].Token != "" {
+		t.Errorf("github token = %q, want empty default", cfg.Code.Providers["github"].Token)
+	}
+}
+
+func Test_Load_when_DeployRootOnly_thenValid(t *testing.T) {
+	root := filepath.ToSlash(filepath.Join(t.TempDir(), "services"))
+	path := writeConfig(t, `
+code:
+  webhook_secret: "x"
+  domain: "example.com"
+deploy:
+  enabled: true
+  root: "`+root+`"
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !cfg.Deploy.Enabled || cfg.Deploy.Root != root {
+		t.Errorf("deploy = %+v", cfg.Deploy)
+	}
+	if !cfg.Deploy.WaitEnabled() || !cfg.Deploy.RemoveOrphansEnabled() {
+		t.Errorf("deploy defaults not applied: %+v", cfg.Deploy)
 	}
 }
 

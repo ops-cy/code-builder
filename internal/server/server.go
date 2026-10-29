@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"gitlab-builder/internal/config"
-	"gitlab-builder/internal/store"
-	"gitlab-builder/internal/webhook"
+	"code-builder/internal/config"
+	"code-builder/internal/store"
+	"code-builder/internal/webhook"
 
 	"github.com/gin-gonic/gin"
 )
@@ -34,7 +34,9 @@ func New(cfg config.Config, logger *slog.Logger, deps webhook.Deps) *Server {
 	r.GET("/healthz", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"ok": true})
 	})
-	r.POST("/webhook", webhook.Handler(deps))
+	webhookHandler := webhook.Handler(deps)
+	r.POST("/webhook", webhookHandler)
+	r.POST("/webhook/:provider", webhookHandler)
 
 	api := r.Group("/api")
 	{

@@ -1,15 +1,22 @@
 # syntax=docker/dockerfile:1
-# Go：调用内置 build-go.sh（go mod tidy + go build -o app），静态产物进 scratch。
-# 入口为仓库根包（go build .）。入口在 ./cmd/xxx 等子目录的项目，
-# 请在仓库根目录提供自己的 Dockerfile 覆盖本模板。
-FROM golang:1.27-alpine AS build
+# Go：调用内置 build-go.sh（go mod download + go build -o app）。
+# 运行阶段使用带 shell 的 Alpine，方便 docker exec 排查；不使用 scratch。
+FROM golang:1.25-alpine AS build
+ARG GOPROXY=https://goproxy.cn,direct
+ENV GOPROXY=${GOPROXY}
+RUN apk add --no-cache bash git ca-certificates
 WORKDIR /src
-RUN apk add --no-cache bash
 COPY . .
-RUN bash .gitlab-builder/build.sh 0
+RUN bash .code-builder/build.sh 0
 
-FROM scratch
+FROM alpine:3.22 AS runtime
+ARG TZ=Asia/Shanghai
+RUN apk add --no-cache bash ca-certificates tzdata curl \
+    && addgroup -S app && adduser -S -G app -u 10001 app
+ENV TZ=${TZ}
 WORKDIR /app
-COPY --from=build /src/app ./app
+COPY --from=build /src/app /app/app
+USER app
 EXPOSE 8080
-ENTRYPOINT ["./app"]
+STOPSIGNAL SIGTERM
+ENTRYPOINT ["/app/app"]

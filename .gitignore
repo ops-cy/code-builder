@@ -3,3 +3,10 @@
 
 # 共享库示例文件
 /shared-libraries/
+
+# 运行时目录
+/data/
+/logs/
+/secrets/
+code-builder
+code-builder.exe

@@ -1,24 +1,34 @@
 package webhook
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"code-builder/internal/config"
 )
 
-// makePushEvent 为 deriveRepository 的测试构造 push 事件：事件负载属于
-// 不可信输入，因此测试同时覆盖被接受和被拒绝的形态。
-func makePushEvent(name, sshURL, httpURL string) PushEvent {
-	var ev PushEvent
-	ev.ObjectKind = "push"
-	ev.EventName = "push"
-	ev.Ref = "refs/heads/main"
-	ev.Before = strings.Repeat("1", 40)
-	ev.After = strings.Repeat("a", 40)
-	ev.CheckoutSHA = strings.Repeat("a", 40)
-	ev.Project.Name = name
-	ev.Project.GitSSHURL = sshURL
-	ev.Project.GitHTTPURL = httpURL
-	return ev
+func testProvider(domains ...string) config.Provider {
+	if len(domains) == 0 {
+		domains = []string{"example.com"}
+	}
+	return config.Provider{Name: config.ProviderGitLab, Domains: domains}
+}
+
+// makePushEvent 为 deriveRepository 的测试构造 push 事件。
+func makePushEvent(name, sshURL, httpURL string) Event {
+	return Event{
+		Provider:    config.ProviderGitLab,
+		Kind:        "push",
+		Ref:         "refs/heads/main",
+		Before:      strings.Repeat("1", 40),
+		After:       strings.Repeat("a", 40),
+		CheckoutSHA: strings.Repeat("a", 40),
+		RepoSSHURL:  sshURL,
+		RepoHTTPURL: httpURL,
+		FullName:    "group/" + name,
+		Namespace:   "group",
+	}
 }
 
 func Test_normalizeDockerName(t *testing.T) {
@@ -57,7 +67,7 @@ func Test_hostMatches(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.url, func(t *testing.T) {
-			if got := hostMatches(tt.url, "code.gitlab.com"); got != tt.want {
+			if got := hostMatches("code.gitlab.com", tt.url); got != tt.want {
 				t.Errorf("hostMatches(%q) = %v, want %v", tt.url, got, tt.want)
 			}
 		})
@@ -69,7 +79,7 @@ func Test_deriveRepository(t *testing.T) {
 		ev := makePushEvent("Backend-API",
 			"ssh://git@example.com:20022/group/backend-api.git",
 			"https://example.com/group/backend-api.git")
-		repo, reason := deriveRepository("example.com", newImageRegistry(), ev)
+		repo, reason := deriveRepository(testProvider(), false, newImageRegistry(), ev)
 		if reason != "" {
 			t.Fatalf("reason = %q, want empty", reason)
 		}
@@ -82,6 +92,40 @@ func Test_deriveRepository(t *testing.T) {
 		if repo.Key == "" || repo.URL == "" {
 			t.Errorf("repo = %+v, want key and url filled", repo)
 		}
+		if repo.Provider != config.ProviderGitLab {
+			t.Errorf("Provider = %q", repo.Provider)
+		}
+		if repo.FullName != "group/Backend-API" || repo.Namespace != "group" {
+			t.Errorf("FullName/Namespace = %q/%q", repo.FullName, repo.Namespace)
+		}
+	})
+
+	t.Run("deploy key prefers ssh url", func(t *testing.T) {
+		ev := makePushEvent("app",
+			"ssh://git@example.com/group/app.git",
+			"https://example.com/group/app.git")
+		repo, reason := deriveRepository(testProvider(), true, newImageRegistry(), ev)
+		if reason != "" || !strings.HasPrefix(repo.URL, "ssh://") {
+			t.Errorf("repo.URL = %q reason=%q, want ssh clone", repo.URL, reason)
+		}
+	})
+
+	t.Run("provider token injects https credentials and masks key", func(t *testing.T) {
+		ev := makePushEvent("app",
+			"ssh://git@example.com/group/app.git",
+			"https://example.com/group/app.git")
+		p := testProvider()
+		p.Token = "tok"
+		repo, reason := deriveRepository(p, true, newImageRegistry(), ev)
+		if reason != "" {
+			t.Fatalf("reason = %q", reason)
+		}
+		if !strings.Contains(repo.URL, "tok@example.com") {
+			t.Errorf("URL = %q, want injected token", repo.URL)
+		}
+		if strings.Contains(repo.Key, "tok") {
+			t.Errorf("Key = %q, must not contain credentials", repo.Key)
+		}
 	})
 
 	t.Run("same image name on another repo gets stable suffix", func(t *testing.T) {
@@ -93,8 +137,8 @@ func Test_deriveRepository(t *testing.T) {
 			"ssh://git@example.com:20022/other/app.git",
 			"https://example.com/other/app.git")
 
-		r1, _ := deriveRepository("example.com", shared, ev1)
-		r2, _ := deriveRepository("example.com", shared, ev2)
+		r1, _ := deriveRepository(testProvider(), false, shared, ev1)
+		r2, _ := deriveRepository(testProvider(), false, shared, ev2)
 		if r1.Build.Image != "app" {
 			t.Errorf("first image = %q, want app", r1.Build.Image)
 		}
@@ -104,8 +148,7 @@ func Test_deriveRepository(t *testing.T) {
 		if !strings.HasPrefix(r2.Build.Image, "app-") {
 			t.Errorf("second image = %q, want app- prefix", r2.Build.Image)
 		}
-		// 幂等：同一事件再次投递必须返回同一个镜像名
-		r2again, _ := deriveRepository("example.com", shared, ev2)
+		r2again, _ := deriveRepository(testProvider(), false, shared, ev2)
 		if r2again.Build.Image != r2.Build.Image {
 			t.Errorf("image not stable: %q vs %q", r2.Build.Image, r2again.Build.Image)
 		}
@@ -115,7 +158,7 @@ func Test_deriveRepository(t *testing.T) {
 		ev := makePushEvent("项目",
 			"ssh://git@example.com:20022/group/repo-name.git",
 			"https://example.com/group/repo-name.git")
-		repo, reason := deriveRepository("example.com", newImageRegistry(), ev)
+		repo, reason := deriveRepository(testProvider(), false, newImageRegistry(), ev)
 		if reason != "" {
 			t.Fatalf("reason = %q, want empty", reason)
 		}
@@ -131,7 +174,8 @@ func Test_deriveRepository(t *testing.T) {
 		ev := makePushEvent("app",
 			"ssh://git@example.com:20022/group/项目.git",
 			"https://example.com/group/项目.git")
-		_, reason := deriveRepository("example.com", newImageRegistry(), ev)
+		ev.FullName = ""
+		_, reason := deriveRepository(testProvider(), false, newImageRegistry(), ev)
 		if reason != reasonInvalidName {
 			t.Errorf("reason = %q, want %q", reason, reasonInvalidName)
 		}
@@ -141,7 +185,7 @@ func Test_deriveRepository(t *testing.T) {
 		ev := makePushEvent("app",
 			"ssh://git@evil.example.org/g/app.git",
 			"https://evil.example.org/g/app.git")
-		_, reason := deriveRepository("example.com", newImageRegistry(), ev)
+		_, reason := deriveRepository(testProvider(), false, newImageRegistry(), ev)
 		if reason != "host_not_allowed" {
 			t.Errorf("reason = %q, want host_not_allowed", reason)
 		}
@@ -149,11 +193,24 @@ func Test_deriveRepository(t *testing.T) {
 
 	t.Run("missing clone url reported", func(t *testing.T) {
 		ev := makePushEvent("app", "", "")
-		_, reason := deriveRepository("example.com", newImageRegistry(), ev)
+		_, reason := deriveRepository(testProvider(), false, newImageRegistry(), ev)
 		if reason != "missing_repo_url" {
 			t.Errorf("reason = %q, want missing_repo_url", reason)
 		}
 	})
+}
+
+func Test_safeJoin_rejects_escape(t *testing.T) {
+	root := t.TempDir()
+	for _, bad := range []string{"../etc", "/abs", "a/../../b", `a\b`, ""} {
+		if _, ok := safeJoin(root, bad); ok {
+			t.Errorf("safeJoin(%q) ok = true, want false", bad)
+		}
+	}
+	got, ok := safeJoin(root, "acme/app")
+	if !ok || !strings.HasSuffix(got, filepath.Join("acme", "app")) {
+		t.Errorf("safeJoin() = %q, %v", got, ok)
+	}
 }
 
 func Test_validCommitSHA(t *testing.T) {
@@ -179,10 +236,8 @@ func Test_validCommitSHA(t *testing.T) {
 }
 
 func Test_dedup_getPutRelease(t *testing.T) {
-	// 准备
 	d := newDedup()
 
-	// 执行/断言：put + get 命中
 	_, dup := d.get("k@sha")
 	if dup {
 		t.Fatal("first get must not be duplicate")
@@ -194,13 +249,11 @@ func Test_dedup_getPutRelease(t *testing.T) {
 		t.Error("second get must be duplicate while build is active")
 	}
 
-	// 用不匹配的 id 调用 release 不得清除该条目
 	d.release("k@sha", "other-build")
 	if _, dup := d.get("k@sha"); !dup {
 		t.Error("release with wrong id must not clear the dedup entry")
 	}
 
-	// 用匹配的 id 调用 release 会清除该条目
 	d.release("k@sha", "build-1")
 	if _, dup := d.get("k@sha"); dup {
 		t.Error("release with matching id must clear the dedup entry")
@@ -208,15 +261,12 @@ func Test_dedup_getPutRelease(t *testing.T) {
 }
 
 func Test_imageRegistry_stableAcrossCalls(t *testing.T) {
-	// 准备
 	reg := newImageRegistry()
 
-	// 执行
 	first := reg.resolve("app", "example.com/g/app")
 	second := reg.resolve("app", "example.com/g/app")
 	conflict := reg.resolve("app", "example.com/other/app")
 
-	// 断言
 	if first != "app" {
 		t.Errorf("first = %q, want app", first)
 	}

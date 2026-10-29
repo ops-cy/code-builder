@@ -7,7 +7,7 @@ import "strings"
 // "host:path"（路径段不是数字）转换为 host/path，同时保留真正的
 // "host:port/path" 写法。
 func normalizeGitURL(u string) string {
-	s := strings.TrimSpace(u)
+	s := stripCredentials(u)
 	if s == "" {
 		return ""
 	}
@@ -33,6 +33,31 @@ func normalizeGitURL(u string) string {
 		return strings.ToLower(s[:i]) + s[i:]
 	}
 	return strings.ToLower(s)
+}
+
+// stripCredentials 去掉 URL 中的 userinfo（user:password@ / token@），
+// 使仓库身份与日志都不包含凭据。scp 形式的固定用户名 git 也会去掉，
+// 便于与 HTTPS 地址得到同一个 key。
+func stripCredentials(u string) string {
+	s := strings.TrimSpace(u)
+	if s == "" {
+		return ""
+	}
+	if i := strings.Index(s, "://"); i >= 0 {
+		rest := s[i+3:]
+		at := strings.IndexByte(rest, '@')
+		slash := strings.IndexByte(rest, '/')
+		if at >= 0 && (slash < 0 || at < slash) {
+			return s[:i+3] + rest[at+1:]
+		}
+		return s
+	}
+	if at := strings.IndexByte(s, '@'); at >= 0 {
+		if colon := strings.IndexByte(s, ':'); colon < 0 || at < colon {
+			return s[at+1:]
+		}
+	}
+	return s
 }
 
 func isAllDigits(s string) bool {
@@ -113,4 +138,14 @@ func hostMatches(configuredHost, rawURL string) bool {
 	want := hostOf(configuredHost)
 	got := hostOf(rawURL)
 	return want != "" && want == got
+}
+
+// hostAllowed 报告 rawURL 的主机是否属于 domains 中任意一个域名。
+func hostAllowed(domains []string, rawURL string) bool {
+	for _, d := range domains {
+		if hostMatches(d, rawURL) {
+			return true
+		}
+	}
+	return false
 }

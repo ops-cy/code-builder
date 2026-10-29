@@ -235,7 +235,7 @@ func formatTime(t time.Time) string {
 	return t.In(shanghai()).Format("2006-01-02 15:04:05")
 }
 
-// shanghai 固定使用 UTC+8，无需加载 tzdata（运行时镜像为精简版）。
+// shanghai 固定使用 UTC+8，无需依赖运行时 tzdata。
 func shanghai() *time.Location {
 	return time.FixedZone("CST", 8*60*60)
 }

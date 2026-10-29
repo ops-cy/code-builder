@@ -2,25 +2,22 @@ package webhook
 
 import (
 	"context"
-	"crypto/subtle"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"path/filepath"
-	"slices"
 	"strings"
 	"time"
 
-	"gitlab-builder/internal/builder"
-	"gitlab-builder/internal/config"
-	"gitlab-builder/internal/deploy"
-	"gitlab-builder/internal/gitx"
-	"gitlab-builder/internal/notify"
-	"gitlab-builder/internal/queue"
-	"gitlab-builder/internal/store"
+	"code-builder/internal/builder"
+	"code-builder/internal/config"
+	"code-builder/internal/deploy"
+	"code-builder/internal/gitx"
+	"code-builder/internal/notify"
+	"code-builder/internal/queue"
+	"code-builder/internal/store"
 
 	"github.com/gin-gonic/gin"
 )
@@ -31,104 +28,140 @@ const maxBodyBytes = 1 << 20 // 1 MiB
 // Deps 汇总 handler 的依赖项。所有与具体仓库相关的内容都在每个事件中推导，
 // 这里只存放全局策略。
 type Deps struct {
-	Domain        string
+	// Providers 是已启用的平台配置（gitlab / github / gitee）。
+	Providers     map[string]config.Provider
 	Branches      []string
 	DeployKeyPath string // 可选的 SSH 部署密钥，用于所有 clone（由环境变量提供）
-	Secret        string
+	Secret        string // 所有平台共用的 Webhook Secret
 	Store         *store.Store
 	Queue         *queue.Queue
 	Logger        *slog.Logger
 	Workspace     string
-	Registry      config.RegistryConfig // 可选的镜像推送目标（受 URL 白名单限制）
-	Build         config.BuildConfig    // tag 策略（为空时默认 latest）
-	Timeouts      config.TimeoutsConfig // 各步骤的超时上限（job/clone/build/deploy）
-	Deploy        config.DeployConfig   // 可选的构建后 compose up -d
-	Notify        notify.Sender         // 可选的流水线通知（nil 表示关闭）
+	Registry      config.RegistryConfig
+	Build         config.BuildConfig
+	Timeouts      config.TimeoutsConfig
+	Deploy        config.DeployConfig
+	Notify        notify.Sender
 }
 
-// Handler 返回处理 POST /webhook 的 gin handler。去重表和镜像 registry 都是
-// 该 handler 内部、跨请求共享的状态。
+// Handler 返回处理 POST /webhook 与 POST /webhook/:provider 的 gin handler。
+// 去重表和镜像 registry 都是该 handler 内部、跨请求共享的状态。
 func Handler(deps Deps) gin.HandlerFunc {
 	dup := newDedup()
 	imgs := newImageRegistry()
 	return func(c *gin.Context) {
 		logger := deps.Logger
 
-		token := c.GetHeader("X-Gitlab-Token")
-		if subtle.ConstantTimeCompare([]byte(token), []byte(deps.Secret)) != 1 {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
-			return
+		providerName := strings.ToLower(strings.TrimSpace(c.Param("provider")))
+		if providerName == "" {
+			providerName = strings.ToLower(strings.TrimSpace(c.GetHeader("X-Builder-Provider")))
 		}
 
 		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxBodyBytes)
-		var ev PushEvent
-		if err := json.NewDecoder(c.Request.Body).Decode(&ev); err != nil {
+		body, err := io.ReadAll(c.Request.Body)
+		if err != nil {
 			var maxErr *http.MaxBytesError
 			if errors.As(err, &maxErr) {
 				c.JSON(http.StatusBadRequest, gin.H{"error": "payload too large"})
 				return
 			}
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_json"})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "read_body_failed"})
 			return
 		}
 
-		if !ev.isPush() {
-			c.JSON(http.StatusAccepted, gin.H{"status": "ignored", "reason": "not a push event"})
-			return
+		if providerName == "" {
+			detected, err := detectProvider(c.Request, body)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "unknown_provider"})
+				return
+			}
+			providerName = detected
 		}
-		if ev.isDelete() {
-			c.JSON(http.StatusAccepted, gin.H{"status": "ignored", "reason": "ref deletion"})
-			return
-		}
-		branch, ok := ev.branch()
+		provider, ok := deps.Providers[providerName]
 		if !ok {
-			c.JSON(http.StatusAccepted, gin.H{"status": "ignored", "reason": "not a branch ref"})
+			c.JSON(http.StatusNotFound, gin.H{"error": "provider_not_enabled", "provider": providerName})
 			return
 		}
 
-		repo, reason := deriveRepository(deps.Domain, imgs, ev)
+		if err := verifyWebhook(providerName, deps.Secret, c.Request, body); err != nil {
+			logger.InfoContext(c.Request.Context(), "webhook: verification failed",
+				slog.String("provider", providerName), slog.Any("err", err))
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized", "provider": providerName})
+			return
+		}
+
+		ev, err := parseEvent(providerName, c.Request, body)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_json", "provider": providerName})
+			return
+		}
+		if ev.Kind == "ping" {
+			c.JSON(http.StatusOK, gin.H{"status": "pong", "provider": providerName})
+			return
+		}
+		if !ev.IsPush() {
+			c.JSON(http.StatusAccepted, gin.H{"status": "ignored", "reason": "not a push event", "provider": providerName})
+			return
+		}
+		if ev.IsDelete() {
+			c.JSON(http.StatusAccepted, gin.H{"status": "ignored", "reason": "ref deletion", "provider": providerName})
+			return
+		}
+		branch, ok := ev.Branch()
+		if !ok {
+			c.JSON(http.StatusAccepted, gin.H{"status": "ignored", "reason": "not a branch ref", "provider": providerName})
+			return
+		}
+
+		repo, reason := deriveRepository(provider, deps.DeployKeyPath != "", imgs, ev)
 		if reason != "" {
 			logger.InfoContext(c.Request.Context(), "webhook: event rejected",
+				slog.String("provider", providerName),
 				slog.String("reason", reason),
-				slog.String("ssh_url", gitx.MaskURL(ev.Project.GitSSHURL)),
-				slog.String("http_url", gitx.MaskURL(ev.Project.GitHTTPURL)))
-			c.JSON(http.StatusAccepted, gin.H{"status": reason, "branch": branch})
+				slog.String("ssh_url", gitx.MaskURL(ev.RepoSSHURL)),
+				slog.String("http_url", gitx.MaskURL(ev.RepoHTTPURL)))
+			c.JSON(http.StatusAccepted, gin.H{"status": reason, "provider": providerName, "branch": branch})
 			return
 		}
-		if !slices.Contains(deps.Branches, branch) {
+		if !(config.CodeConfig{Branches: deps.Branches}).BranchAllowed(branch) {
 			logger.InfoContext(c.Request.Context(), "webhook: branch filtered",
+				slog.String("provider", providerName),
 				slog.String("repo", repo.Name), slog.String("branch", branch))
-			c.JSON(http.StatusAccepted, gin.H{"status": "branch_filtered", "repo": repo.Name, "branch": branch})
+			c.JSON(http.StatusAccepted, gin.H{"status": "branch_filtered", "provider": providerName, "repo": repo.Name, "branch": branch})
 			return
 		}
-		sha := ev.sha()
+		sha := ev.SHA()
 		if !validCommitSHA(sha) {
 			logger.InfoContext(c.Request.Context(), "webhook: invalid commit sha",
+				slog.String("provider", providerName),
 				slog.String("repo", repo.Name), slog.String("sha", sha))
-			c.JSON(http.StatusAccepted, gin.H{"status": "ignored", "reason": "invalid commit sha"})
+			c.JSON(http.StatusAccepted, gin.H{"status": "ignored", "reason": "invalid commit sha", "provider": providerName})
 			return
 		}
 		tag := deps.Build.ResolveTag(branch, sha)
 
-		// 重复投递防护：同一仓库的同一 commit 在其构建仍在排队或运行时，
-		// 不得再次构建。
+		// 重复投递防护：同一仓库的同一 commit 在其构建仍在排队或运行时不得再次构建。
 		dkey := repo.Key + "@" + sha
 		if id, ok := dup.get(dkey); ok {
 			logger.InfoContext(c.Request.Context(), "webhook: duplicate delivery skipped",
+				slog.String("provider", providerName),
 				slog.String("repo", repo.Name), slog.String("sha", sha),
 				slog.String("build_id", id))
-			c.JSON(http.StatusAccepted, gin.H{"status": "duplicate", "build_id": id, "repo": repo.Name, "sha": sha})
+			c.JSON(http.StatusAccepted, gin.H{"status": "duplicate", "provider": providerName, "build_id": id, "repo": repo.Name, "sha": sha})
 			return
 		}
 
 		repo.DeployKeyPath = deps.DeployKeyPath
 		build := deps.Store.Create(store.Build{
 			Repo:          repo.Name,
+			FullName:      repo.FullName,
+			Namespace:     repo.Namespace,
+			Provider:      repo.Provider,
 			Branch:        branch,
 			SHA:           sha,
 			ShortSHA:      sha[:8],
-			Actor:         ev.actor(),
-			CommitSubject: ev.commitSubject(sha),
+			Actor:         ev.Actor,
+			CommitSubject: ev.CommitSubject,
 			Status:        store.StatusQueued,
 			Tag:           tag,
 			CreatedAt:     time.Now(),
@@ -163,25 +196,28 @@ func Handler(deps Deps) gin.HandlerFunc {
 		}
 
 		logger.InfoContext(c.Request.Context(), "webhook: build queued",
+			slog.String("provider", providerName),
 			slog.String("build_id", build.ID),
 			slog.String("repo", repo.Name),
+			slog.String("full_name", repo.FullName),
 			slog.String("branch", branch),
 			slog.String("sha", sha),
 			slog.String("image", repo.Build.Image))
 		c.JSON(http.StatusAccepted, gin.H{
-			"status":   "queued",
-			"build_id": build.ID,
-			"repo":     repo.Name,
-			"branch":   branch,
-			"sha":      sha,
-			"image":    repo.Build.Image,
-			"tag":      tag,
+			"status":    "queued",
+			"provider":  providerName,
+			"build_id":  build.ID,
+			"repo":      repo.Name,
+			"full_name": repo.FullName,
+			"branch":    branch,
+			"sha":       sha,
+			"image":     repo.Build.Image,
+			"tag":       tag,
 		})
 	}
 }
 
-// validCommitSHA 要求完整的十六进制对象 id：40 个字符（SHA-1，Git 默认）
-// 或 64 个字符（SHA-256）。后面会从中截取 8 个字符作为镜像 tag。
+// validCommitSHA 要求完整的十六进制对象 id：40 个字符（SHA-1）或 64 个字符（SHA-256）。
 func validCommitSHA(s string) bool {
 	if len(s) != 40 && len(s) != 64 {
 		return false
@@ -196,8 +232,7 @@ func validCommitSHA(s string) bool {
 }
 
 // pipeline 返回任务执行函数：标记为运行中、带超时地执行构建、把结果和完整
-// 原因同时写入构建日志和 store，然后在启用部署且存在匹配仓库名的目标时
-// 执行部署。
+// 原因同时写入构建日志和 store，然后在启用部署且存在匹配目标时执行部署。
 func pipeline(deps Deps, buildID string, repo config.Repository, branch, sha, tag string) func(context.Context) error {
 	return func(ctx context.Context) error {
 		started := time.Now()
@@ -219,8 +254,8 @@ func pipeline(deps Deps, buildID string, repo config.Repository, branch, sha, ta
 		}
 		defer logf.Close()
 
-		fmt.Fprintf(logf, "build %s repo=%s url=%s branch=%s sha=%s image=%s tag=%s\n",
-			buildID, repo.Name, gitx.MaskURL(repo.URL), branch, sha, repo.Build.Image, tag)
+		fmt.Fprintf(logf, "build %s provider=%s repo=%s url=%s branch=%s sha=%s image=%s tag=%s\n",
+			buildID, repo.Provider, repo.Name, gitx.MaskURL(repo.URL), branch, sha, repo.Build.Image, tag)
 
 		jobCtx, cancel := context.WithTimeout(ctx, deps.Timeouts.JobDuration())
 		defer cancel()
@@ -232,6 +267,7 @@ func pipeline(deps Deps, buildID string, repo config.Repository, branch, sha, ta
 			Log:          logf,
 			Workspace:    deps.Workspace,
 			Registry:     deps.Registry,
+			Build:        deps.Build,
 			CloneTimeout: deps.Timeouts.CloneDuration(),
 			BuildTimeout: deps.Timeouts.BuildDuration(),
 		})
@@ -273,8 +309,9 @@ func pipeline(deps Deps, buildID string, repo config.Repository, branch, sha, ta
 
 // 部署接缝：使用包级变量，便于测试替换 docker CLI。
 var (
-	deployUp = deploy.Up
-	deployPs = deploy.Ps
+	deployUp   = deploy.Up
+	deployPs   = deploy.Ps
+	deployLogs = deploy.Logs
 )
 
 // deployAfterBuild 应用与 repoName 匹配的已配置部署目标。跳过或失败的部署
@@ -297,7 +334,11 @@ func deployAfterBuild(ctx context.Context, deps Deps, buildID, repoName string, 
 		record(notify.DeploySkipped, reason, "", "", "", false)
 		return
 	}
-	tgt, ok := deps.Deploy.Target(repoName)
+	b, _ := deps.Store.Get(buildID)
+	tgt, ok := deps.Deploy.Match(repoName, b.FullName)
+	if !ok {
+		tgt, ok = discoverTarget(deps.Deploy, repoName, b.FullName, b.Namespace)
+	}
 	if !ok {
 		reason := "no target for " + repoName
 		fmt.Fprintf(logf, "deploy skipped: %s\n", reason)
@@ -305,16 +346,35 @@ func deployAfterBuild(ctx context.Context, deps Deps, buildID, repoName string, 
 		return
 	}
 
-	target := filepath.Join(tgt.Dir, tgt.ComposeFile)
+	target := deploy.Target{
+		Dir:           tgt.Dir,
+		ComposeFile:   tgt.ComposeFile,
+		ComposeFiles:  deps.Deploy.ComposeFileCandidates(),
+		Service:       tgt.Service,
+		ProjectName:   tgt.ProjectName,
+		Env:           tgt.Env,
+		Wait:          deps.Deploy.WaitEnabled(),
+		WaitTimeout:   deps.Deploy.WaitTimeout,
+		Pull:          deps.Deploy.Pull,
+		RemoveOrphans: deps.Deploy.RemoveOrphansEnabled(),
+	}
+	// 尽量提前解析 compose 文件名，便于日志与通知展示；失败时交给
+	// deploy.Up 返回更完整的错误。
+	if resolved, err := deploy.Resolve(target); err == nil {
+		target = resolved
+	}
+
 	req := deploy.Request{
-		Repo: repoName,
-		Target: deploy.Target{
-			Dir:         tgt.Dir,
-			ComposeFile: tgt.ComposeFile,
-			Service:     tgt.Service,
-		},
-		Timeout: deps.Timeouts.DeployDuration(),
-		Log:     logf,
+		Repo:     repoName,
+		FullName: b.FullName,
+		Provider: b.Provider,
+		Image:    b.Repo + ":" + b.Tag,
+		Tag:      b.Tag,
+		Branch:   b.Branch,
+		SHA:      b.SHA,
+		Target:   target,
+		Timeout:  deps.Timeouts.DeployDuration(),
+		Log:      logf,
 	}
 	if err := deployUp(ctx, req); err != nil {
 		output, psErr := deployPs(ctx, req)
@@ -324,26 +384,99 @@ func deployAfterBuild(ctx context.Context, deps Deps, buildID, repoName string, 
 			}
 			output += "compose ps error: " + psErr.Error()
 		}
-		fmt.Fprintf(logf, "==> deploy failed repo=%s target=%s error=%s\n", repoName, target, err)
+		logs, logsErr := deployLogs(ctx, req)
+		if logsErr != nil {
+			if logs != "" {
+				logs += "\n"
+			}
+			logs += "compose logs error: " + logsErr.Error()
+		}
+		if strings.TrimSpace(logs) != "" {
+			if output != "" {
+				output += "\n"
+			}
+			output += "compose logs:\n" + logs
+		}
+		fmt.Fprintf(logf, "==> deploy failed repo=%s target=%s error=%s\n", repoName, target.Dir, err)
 		deps.Logger.ErrorContext(ctx, "deploy failed",
 			slog.String("build_id", buildID),
 			slog.String("repo", repoName),
-			slog.String("target", target),
+			slog.String("target", target.Dir),
 			slog.Any("err", err))
-		record(notify.DeployFailed, "", target, err.Error(), output, false)
+		record(notify.DeployFailed, "", target.File(), err.Error(), output, false)
 		return
 	}
 
-	fmt.Fprintf(logf, "==> deploy success repo=%s target=%s\n", repoName, target)
+	fmt.Fprintf(logf, "==> deploy success repo=%s target=%s\n", repoName, target.Dir)
 	deps.Logger.InfoContext(ctx, "deploy succeeded",
 		slog.String("build_id", buildID),
 		slog.String("repo", repoName),
-		slog.String("target", target))
-	record(notify.DeployDeployed, "", target, "", "", true)
+		slog.String("target", target.Dir))
+	record(notify.DeployDeployed, "", target.File(), "", "", true)
 }
 
-// notifyEvent 发送一条流水线通知，既不阻塞也不影响构建：投递失败只会被
-// 记录到 Build.NotifyError 中。
+// discoverTarget 在 deploy.root 下按标准布局查找服务目录：
+//
+//	<root>/<repo_name>
+//	<root>/<namespace>/<repo_name>
+//	<root>/<full_name>
+func discoverTarget(cfg config.DeployConfig, repoName, fullName, namespace string) (config.DeployTarget, bool) {
+	root := strings.TrimSpace(cfg.Root)
+	if root == "" {
+		return config.DeployTarget{}, false
+	}
+	candidates := make([]string, 0, 3)
+	if dir, ok := safeJoin(root, repoName); ok {
+		candidates = append(candidates, dir)
+	}
+	if namespace != "" {
+		if dir, ok := safeJoin(root, namespace+"/"+repoName); ok {
+			candidates = append(candidates, dir)
+		}
+	}
+	if fullName != "" {
+		if dir, ok := safeJoin(root, fullName); ok {
+			candidates = append(candidates, dir)
+		}
+	}
+	seen := make(map[string]bool, len(candidates))
+	for _, dir := range candidates {
+		if seen[dir] {
+			continue
+		}
+		seen[dir] = true
+		if t, ok := deploy.TargetFromDir(dir, cfg.ComposeFileCandidates()); ok {
+			return t, true
+		}
+	}
+	return config.DeployTarget{}, false
+}
+
+// safeJoin 将事件中的相对仓库路径安全地拼到部署根目录下，拒绝空段、
+// ".."、绝对路径与反斜杠，防止 payload 逃逸 deploy.root。
+func safeJoin(root, rel string) (string, bool) {
+	root = filepath.Clean(root)
+	raw := strings.TrimSpace(rel)
+	if raw == "" || strings.HasPrefix(raw, "/") || filepath.IsAbs(raw) {
+		return "", false
+	}
+	rel = strings.Trim(raw, "/")
+	if rel == "" {
+		return "", false
+	}
+	for _, seg := range strings.Split(rel, "/") {
+		if seg == "" || seg == "." || seg == ".." || strings.ContainsAny(seg, `\:`) {
+			return "", false
+		}
+	}
+	dir := filepath.Clean(filepath.Join(root, filepath.FromSlash(rel)))
+	if dir != root && !strings.HasPrefix(dir, root+string(filepath.Separator)) {
+		return "", false
+	}
+	return dir, true
+}
+
+// notifyEvent 发送一条流水线通知，既不阻塞也不影响构建。
 func notifyEvent(deps Deps, buildID string, ev notify.Event, errMsg string) {
 	if deps.Notify == nil || !deps.Notify.Wants(ev) {
 		return

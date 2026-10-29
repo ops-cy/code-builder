@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"gitlab-builder/internal/config"
-	"gitlab-builder/internal/templates"
+	"code-builder/internal/config"
+	"code-builder/internal/templates"
 	"go.uber.org/goleak"
 )
 
@@ -91,12 +91,11 @@ func Test_ResolveDockerfile_when_NoRepoDockerfile_thenUseBuiltinTemplate(t *test
 		wantScriptIncl string
 	}{
 		{name: "go module", markerFile: "go.mod", markerBody: "module x\n", wantSource: "template:go", wantInFile: "FROM golang:", wantScript: true, wantScriptIncl: "go build"},
-		{name: "maven", markerFile: "pom.xml", markerBody: "<project/>\n", wantSource: "template:java", wantInFile: "maven:3.9-eclipse-temurin-21", wantScript: true, wantScriptIncl: "mvn clean package"},
-		{name: "gradle", markerFile: "build.gradle", markerBody: "", wantSource: "template:gradle", wantInFile: "gradle:8-jdk21", wantScript: false},
+		{name: "maven", markerFile: "pom.xml", markerBody: "<project/>\n", wantSource: "template:java", wantInFile: "maven:3.9-eclipse-temurin-21", wantScript: true, wantScriptIncl: "clean package"},
+		{name: "gradle", markerFile: "build.gradle", markerBody: "", wantSource: "template:gradle", wantInFile: "gradle:8-jdk21", wantScript: true, wantScriptIncl: "bootJar"},
 		{name: "node", markerFile: "package.json", markerBody: `{"dependencies":{"express":"^4"}}`, wantSource: "template:node", wantInFile: "node:22-alpine", wantScript: true, wantScriptIncl: "npm run build"},
 		{name: "vue", markerFile: "package.json", markerBody: `{"dependencies":{"vue":"^3"}}`, wantSource: "template:vue", wantInFile: "nginx:", wantScript: true, wantScriptIncl: "npm run build"},
-		{name: "python", markerFile: "requirements.txt", markerBody: "flask\n", wantSource: "template:python", wantInFile: "python:3.12-slim", wantScript: true, wantScriptIncl: "pip install -r requirements.txt"},
-		{name: "php", markerFile: "composer.json", markerBody: "{}\n", wantSource: "template:php", wantInFile: "php:8.2-cli", wantScript: true, wantScriptIncl: "composer install"},
+		{name: "rust", markerFile: "Cargo.toml", markerBody: "[package]\nname = \"demo\"\n", wantSource: "template:rust", wantInFile: "rust:1.83-slim", wantScript: true, wantScriptIncl: "cargo build --release"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -140,6 +139,22 @@ func Test_ResolveDockerfile_when_NoRepoDockerfile_thenUseBuiltinTemplate(t *test
 				t.Errorf("resolveDockerfile() wrote %s for %s, want none", templates.ScriptPath, source)
 			}
 		})
+	}
+}
+
+func Test_ResolveDockerfile_when_DockerignoreExcludesBuildDir_thenError(t *testing.T) {
+	repoDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repoDir, "go.mod"), []byte("module x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, ".dockerignore"), []byte(".code-builder\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err := resolveDockerfile(repoDir)
+
+	if err == nil || !strings.Contains(err.Error(), ".code-builder") {
+		t.Fatalf("resolveDockerfile() error = %v, want .dockerignore guidance", err)
 	}
 }
 

@@ -1,14 +1,17 @@
-// Package store 在内存中保存构建记录，在磁盘上保存构建日志。
+// Package store 在内存中保存构建记录，在磁盘上保存构建日志，并可将构建
+// 记录持久化为 JSON，避免服务重启后丢失历史。
 package store
 
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -29,21 +32,24 @@ const (
 type Build struct {
 	ID            string
 	Repo          string
+	FullName      string // 平台上的完整仓库名，例如 owner/repo
+	Namespace     string
+	Provider      string // gitlab / github / gitee
 	Branch        string
 	SHA           string
 	ShortSHA      string
-	Actor         string // webhook 事件中的推送发起人
-	CommitSubject string // webhook 事件中的单行提交摘要
+	Actor         string
+	CommitSubject string
 	Status        Status
-	Tag           string // 本次构建解析出的镜像 tag
+	Tag           string
 	ImageTags     []string
-	Deployed      bool   // 构建后部署成功时为 true
-	DeployStatus  string // 取值："", "skipped", "deployed", "failed"
-	DeployReason  string // 跳过部署的原因
-	DeployTarget  string // "<目录>/<compose 文件>"
-	DeployError   string // 部署失败时非空
-	DeployOutput  string // 部署失败后的 `docker compose ps` 输出
-	NotifyError   string // 通知投递失败时非空
+	Deployed      bool
+	DeployStatus  string
+	DeployReason  string
+	DeployTarget  string
+	DeployError   string
+	DeployOutput  string
+	NotifyError   string
 	Error         string
 	LogPath       string
 	CreatedAt     time.Time
@@ -51,20 +57,62 @@ type Build struct {
 	FinishedAt    time.Time
 }
 
-// Store 是并发安全的构建内存注册表；日志正文存放在 logsDir 下的磁盘上。
+// Store 是并发安全的构建内存注册表；日志正文存放在 logsDir 下，构建记录
+// 可选地持久化到 statePath。
 type Store struct {
-	mu     sync.RWMutex
-	logs   string
-	nextID int
-	builds map[string]*Build
+	mu        sync.RWMutex
+	logs      string
+	statePath string
+	nextID    int
+	builds    map[string]*Build
 }
 
-// New 在日志目录不存在时创建它，并返回空 store。
+// New 在日志目录不存在时创建它，并返回空 store（不持久化构建记录）。
 func New(logsDir string) *Store {
+	return NewPersistent(logsDir, "")
+}
+
+// NewPersistent 创建 store，并在 statePath 非空时加载已有构建记录。
+func NewPersistent(logsDir, statePath string) *Store {
 	_ = os.MkdirAll(logsDir, 0o755)
-	return &Store{
-		logs:   logsDir,
-		builds: make(map[string]*Build),
+	s := &Store{
+		logs:      logsDir,
+		statePath: statePath,
+		builds:    make(map[string]*Build),
+	}
+	if statePath != "" {
+		s.load()
+	}
+	return s
+}
+
+type persistedState struct {
+	NextID int     `json:"next_id"`
+	Builds []Build `json:"builds"`
+}
+
+func (s *Store) load() {
+	data, err := os.ReadFile(s.statePath)
+	if err != nil {
+		return
+	}
+	var st persistedState
+	if err := json.Unmarshal(data, &st); err != nil {
+		fmt.Fprintf(os.Stderr, "store: load %s: %v\n", s.statePath, err)
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.nextID = st.NextID
+	for i := range st.Builds {
+		b := st.Builds[i]
+		if b.ID == "" {
+			continue
+		}
+		if n := idNumber(b.ID); n > s.nextID {
+			s.nextID = n
+		}
+		s.builds[b.ID] = &b
 	}
 }
 
@@ -78,6 +126,7 @@ func (s *Store) Create(b Build) Build {
 	b.LogPath = filepath.Join(s.logs, id+".log")
 	stored := b
 	s.builds[id] = &stored
+	s.saveLocked()
 	return stored
 }
 
@@ -110,6 +159,7 @@ func (s *Store) Update(id string, fn func(*Build)) {
 	defer s.mu.Unlock()
 	if b, ok := s.builds[id]; ok {
 		fn(b)
+		s.saveLocked()
 	}
 }
 
@@ -151,8 +201,7 @@ func (s *Store) ReadLog(id string) (string, error) {
 	return string(content), nil
 }
 
-// ReadLogTail 最多返回构建日志的最后 n 行，用于在通知中嵌入简短的
-// 失败片段。日志不存在时返回 ""。
+// ReadLogTail 最多返回构建日志的最后 n 行。
 func (s *Store) ReadLogTail(id string, n int) string {
 	if n <= 0 {
 		return ""
@@ -166,6 +215,44 @@ func (s *Store) ReadLogTail(id string, n int) string {
 		return strings.Join(lines, "\n")
 	}
 	return strings.Join(lines[len(lines)-n:], "\n")
+}
+
+// saveLocked 原子写入构建记录；调用方必须持有写锁。
+func (s *Store) saveLocked() {
+	if s.statePath == "" {
+		return
+	}
+	st := persistedState{NextID: s.nextID, Builds: make([]Build, 0, len(s.builds))}
+	for _, b := range s.builds {
+		st.Builds = append(st.Builds, *b)
+	}
+	sort.Slice(st.Builds, func(i, j int) bool { return st.Builds[i].CreatedAt.Before(st.Builds[j].CreatedAt) })
+	data, err := json.Marshal(st)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "store: marshal state: %v\n", err)
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(s.statePath), 0o755); err != nil {
+		fmt.Fprintf(os.Stderr, "store: create state dir: %v\n", err)
+		return
+	}
+	tmp := s.statePath + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		fmt.Fprintf(os.Stderr, "store: write state: %v\n", err)
+		return
+	}
+	if err := os.Rename(tmp, s.statePath); err != nil {
+		fmt.Fprintf(os.Stderr, "store: replace state: %v\n", err)
+	}
+}
+
+func idNumber(id string) int {
+	parts := strings.Split(id, "-")
+	if len(parts) < 2 {
+		return 0
+	}
+	n, _ := strconv.Atoi(parts[1])
+	return n
 }
 
 func randomHex(n int) string {

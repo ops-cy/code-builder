@@ -5,18 +5,18 @@ import (
 	"os"
 	"path/filepath"
 
-	"gitlab-builder/internal/templates"
+	"code-builder/internal/templates"
 )
 
 // resolveDockerfile 为已克隆的仓库选择构建配方：
 //
 //  1. 仓库根目录下自带的 Dockerfile（若存在）；
-//  2. 否则使用内置语言模板（Go / Node / Vue / Java / Gradle），由仓库中的标记文件选出，
-//     并写到仓库根目录，以保持构建上下文统一。委托给构建脚本的模板还会把该脚本写入
-//     templates.ScriptPath。
+//  2. 否则使用内置语言模板（Go / Rust / Java / Gradle / Node / Vue），由仓库中的
+//     标记文件选出，并写到仓库根目录；
+//  3. 两者都没有时明确报错，而不是靠猜测。
 //
-// 返回的 source 描述本次选择，用于构建日志（"repository" 或 "template:<name>"）。
-// 既没有自带 Dockerfile、也没有可识别语言标记的仓库会明确报错，而不是靠猜测。
+// 使用内置模板时还会写入 .code-builder/build.sh；仓库没有 .dockerignore 时
+// 自动生成一份默认规则（不会排除 .code-builder）。
 func resolveDockerfile(repoDir string) (path, source string, err error) {
 	p := filepath.Join(repoDir, "Dockerfile")
 	if st, statErr := os.Stat(p); statErr == nil && !st.IsDir() {
@@ -26,7 +26,15 @@ func resolveDockerfile(repoDir string) (path, source string, err error) {
 	tpl, ok := templates.Detect(repoDir)
 	if !ok {
 		return "", "", fmt.Errorf(
-			"no Dockerfile at repository root and no built-in template matched (Go/Node/Vue/Java/Gradle): %s", repoDir)
+			"no Dockerfile at repository root and no built-in template matched (Go/Rust/Java/Gradle/Node/Vue): %s", repoDir)
+	}
+	if templates.DockerignoreExcludesBuildDir(repoDir) {
+		return "", "", fmt.Errorf(
+			"repository .dockerignore excludes %s, which is required by the built-in %q template; "+
+				"remove that rule or provide your own Dockerfile", templates.ScriptPath, tpl.Name)
+	}
+	if _, err := templates.EnsureDockerignore(repoDir); err != nil {
+		return "", "", fmt.Errorf("write default .dockerignore: %w", err)
 	}
 	if err := os.WriteFile(p, tpl.Content, 0o644); err != nil {
 		return "", "", fmt.Errorf("write built-in template %q: %w", tpl.Name, err)
@@ -36,7 +44,7 @@ func resolveDockerfile(repoDir string) (path, source string, err error) {
 		if err := os.MkdirAll(filepath.Dir(scriptAbs), 0o755); err != nil {
 			return "", "", fmt.Errorf("create build-script dir for template %q: %w", tpl.Name, err)
 		}
-		if err := os.WriteFile(scriptAbs, script, 0o644); err != nil {
+		if err := os.WriteFile(scriptAbs, script, 0o755); err != nil {
 			return "", "", fmt.Errorf("write build script for template %q: %w", tpl.Name, err)
 		}
 	}

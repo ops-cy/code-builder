@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -32,6 +33,39 @@ func Test_Create_when_NewBuild_thenReturnAssignsUniqueIDsAndLogPath(t *testing.T
 	}
 	if a.LogPath == "" {
 		t.Error("LogPath empty")
+	}
+}
+
+func Test_NewPersistent_when_Reopened_thenBuildsAndIDsRestored(t *testing.T) {
+	dir := t.TempDir()
+	state := filepath.Join(dir, "builds.json")
+
+	s := NewPersistent(dir, state)
+	b := s.Create(Build{
+		Repo:      "app",
+		FullName:  "acme/app",
+		Provider:  "github",
+		Branch:    "main",
+		Status:    StatusSuccess,
+		CreatedAt: time.Now(),
+	})
+	s.Update(b.ID, func(bb *Build) { bb.Tag = "latest" })
+
+	reopened := NewPersistent(dir, state)
+	got, ok := reopened.Get(b.ID)
+	if !ok {
+		t.Fatalf("build %q not restored", b.ID)
+	}
+	if got.Provider != "github" || got.FullName != "acme/app" || got.Tag != "latest" {
+		t.Errorf("restored build = %+v", got)
+	}
+
+	next := reopened.Create(Build{Repo: "next", CreatedAt: time.Now()})
+	if next.ID == b.ID {
+		t.Errorf("ID %q reused after restore", next.ID)
+	}
+	if strings.Compare(next.ID, b.ID) == 0 {
+		t.Errorf("next ID = %q, want a new ID", next.ID)
 	}
 }
 

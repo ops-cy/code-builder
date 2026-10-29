@@ -7,7 +7,7 @@ import (
 	"errors"
 	"sync"
 
-	"gitlab-builder/internal/config"
+	"code-builder/internal/config"
 )
 
 // ErrQueueFull 在待处理列表已满时由 Enqueue 返回。

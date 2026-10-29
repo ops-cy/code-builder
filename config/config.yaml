@@ -1,102 +1,120 @@
-# GitLab Webhook 自动镜像构建服务 — 配置示例
+# 多平台代码构建服务 — 配置示例
 #
-# 配置分为 server / code 两段与可选的 timeouts / build / registry / deploy / notify 段：
-# 不维护仓库列表。在授权 GitLab 域名的任意项目添加 Webhook 即可接入；仓库地址、分支、
-# Commit 全部取自事件数据，镜像名 = 仓库 URL 末尾（最后一个 / 与 .git 之间，转小写），
-# Dockerfile 用仓库根目录的（缺失时套内置模板）。Tag 默认 latest，可用 build 段覆盖。
+# 支持 GitLab / GitHub / Gitee。仓库无需登记：只要事件中的仓库地址属于
+# 对应平台配置的域名，且分支命中白名单，就会自动构建。
 #
-# ${VAR} 占位符在启动时从环境变量展开；引用未设置的环境变量将启动失败。
+# 所有平台共用同一个 Webhook Secret（GitLab 的 Secret token、GitHub 的
+# Webhook secret、Gitee 的 Webhook 密码填同一个值）。
+#
+# ${VAR} 在启动时从环境变量展开；${VAR:-} 表示变量可缺省为空。
 
 server:
   # HTTP 监听地址
   listen: ":8080"
-  # git clone 的工作区根目录（容器内路径，按仓库+构建任务隔离子目录）
+  # git clone 工作区（容器内路径，按仓库+构建任务隔离子目录）
   workspace: "/app/workspace"
-  # 构建日志存放目录（容器内路径），每个构建对应 <build_id>.log
+  # 构建日志与构建记录存放目录
   logs_dir: "/app/logs"
+  # 构建记录持久化文件；省略时默认为 <logs_dir>/builds.json
+  state_file: "/app/logs/builds.json"
   # 待处理任务队列上限，超过后 webhook 返回 503
   queue_size: 10
   # 全局并行构建数；同一仓库的任务始终串行执行
   concurrency: 2
 
 code:
-  # Webhook Secret：与 GitLab Webhook 的 Secret token 完全一致
-  # （经 ${GITLAB_WEBHOOK_SECRET} 环境变量注入，未设置将启动失败）
-  webhook_secret: "${GITLAB_WEBHOOK_SECRET}"
-  # 允许接入的 GitLab 实例域名（仓库地址域名必须等于它，否则拒绝）
-  # 支持标准 SSH / HTTP(S) 地址比较，端口不影响判定
-  domain: "code.gitlab.com"
-  # 触发分支白名单（精确匹配）：只有这些分支的 Push 会触发构建
-  # 省略时默认 ["main", "master"]
+  # 全局 Webhook Secret（必填）。三个平台填同一个值。
+  webhook_secret: "${WEBHOOK_SECRET:-}"
+  # 触发分支白名单：精确名称或 glob（release/*）
   branches:
     - "main"
     - "master"
+    - "release/*"
 
-# 各步骤超时（可选）；省略时使用下面的默认值。值为 Go duration（如 15m / 90s）。
+  # 平台配置。省略整个 providers 段时，旧配置 code.domain + code.webhook_secret
+  # 等价于只启用 GitLab。
+  providers:
+    gitlab:
+      enabled: true
+      # 允许接入的 GitLab 域名（GitLab.com 或自建实例域名）
+      domains: ["code.gitlab.com"]
+      # 可选：HTTPS 私有仓库 clone token（配置后优先使用 HTTPS；留空则用 Deploy Key/SSH）
+      token: "${GITLAB_TOKEN:-}"
+
+    github:
+      enabled: true
+      # GitHub.com 用 github.com；GitHub Enterprise 填企业域名
+      domains: ["github.com"]
+      token: "${GITHUB_TOKEN:-}"
+
+    gitee:
+      enabled: true
+      domains: ["gitee.com"]
+      token: "${GITEE_TOKEN:-}"
+
+# 各步骤超时（可选）；省略时使用下面默认值
 timeouts:
   clone: "15m"
   build: "25m"
   job: "30m"
   deploy: "5m"
 
-# 镜像 Tag 策略（可选）。默认（整段省略）= latest。
-# 解析顺序：branch_tags[分支] → build.tag → latest
+# 镜像 Tag 策略（可选）。默认 latest。
 build:
-  # 所有分支的默认 tag（例: latest / stable / v1.2.3）
+  # 所有分支的默认 tag
   tag: ""
-  # 按分支覆盖 tag（精确匹配），优先于 build.tag
-  # 例: { "pre": "latest", "main": "stable" }
+  # 按分支覆盖 tag，优先级高于 build.tag
   branch_tags: {}
+  # 额外产出 sha-<短SHA> 标签
+  sha_tag: false
+  # docker build --platform，例如 linux/amd64；留空使用宿主默认
+  platform: ""
+  # docker build --pull
+  pull: false
+  # 额外 build-arg / label
+  args: {}
+  labels: {}
+  # docker build --cache-from 列表
+  cache_from: []
 
-# 镜像推送（可选）。不写这一段 = 只构建本地镜像（默认，行为与以前完全一致）。
-# 填写 registry.url 即启用：构建成功后打远程 tag 并推送。
-# 判定规则：url 非空 → 推送；url 为空或缺省 → 仅本地。
+# 镜像推送（可选）。不写或 url 为空 = 只构建本地镜像。
 registry:
-  # 镜像仓库地址，例: registry.example.com（留空=仅本地构建）
   url: ""
-  # 可选：镜像名前缀 / 命名空间，例: tenants
   project: ""
-  # 可选：登录凭据。username 与 password 要么都填、要么都留空；
-  # 都填则在推送前执行 docker login，都空则假定守护进程已登录。
-  # 建议 password 用 ${REGISTRY_PASSWORD} 由环境变量注入（未设置将启动失败）。
   username: ""
-  password: ""
+  password: "${REGISTRY_PASSWORD:-}"
 
-# 构建后自动部署（可选）。省略或 enabled:false = 不部署。
-# 构建成功后，用仓库 URL 末尾值（repo_name）匹配 targets 的 key；命中则执行：
-#   docker compose -f <dir>/<compose_file> up -d [service]
-# 工作目录 = <dir>；不 pull，compose 直接引用刚构建出的本地镜像。
-# 部署失败不影响构建结果（构建仍 success，错误记入 DeployError）。
+# 构建后本机部署（可选）。
 deploy:
   enabled: false
-  # key = 仓库 URL 末尾（最后一个 / 与 .git 之间，转小写；大小写不敏感）
+  # 自动发现根目录：标准布局 <root>/<repo_name>/docker-compose.yml
+  # 也可用 <root>/<namespace>/<repo_name>/... 或 <root>/<owner/repo>/...
+  root: "/data/services"
+  compose_files: ["docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"]
+  # 使用 compose --wait 等待容器 running/healthy
+  wait: true
+  wait_timeout: "120s"
+  # never / missing / always；默认 never，禁止部署时拉取旧镜像
+  pull: "never"
+  remove_orphans: true
+
+  # 显式登记（可选，优先于自动发现）。key 可以是 repo_name 或 owner/repo。
   # targets:
   #   atlas-market:
-  #     # 服务目录（容器内绝对路径；宿主机需同路径挂载，见 docker-compose.yml）
   #     dir: "/data/services/atlas-market"
-  #     # 目录内的启动文件（仅文件名，不含路径）
-  #     compose_file: "docker-compose.yaml"
-  #     # 可选：只启动某个 compose 服务；留空 = 启动整个文件
-  #     service: ""
-  #     # 兼容字段：保留解析但不参与判断（部署不看 tag）
-  #     tag: ""
+  #     compose_file: ""          # 留空自动探测
+  #     service: ""               # 留空启动整个 compose
+  #     project_name: ""          # 可选 compose 项目名
+  #     env:                      # 额外传给 compose 的环境变量
+  #       APP_ENV: "prod"
 
-# 流水线通知（可选）。省略或 enabled:false = 不发送任何通知。
-# 卡片格式与 Jenkins 共享库一致：标题 / 项目名称 / 构建发起 / 当前版本 / 持续时间 /
-# 提交摘要 / 错误摘要 / 推送时间。通知失败不影响构建结果（记入 build 的 NotifyError）。
+# 流水线通知（可选）
 notify:
-  # 是否开启通知
   enabled: false
-  # 各事件开关（省略 = true）
-  on_started: true      # 🚀 流水线开始
-  on_success: true      # ✅ 流水线成功
-  on_failure: true      # ❌ 流水线失败
+  on_started: true
+  on_success: true
+  on_failure: true
   lark:
-    # 飞书自定义机器人 Webhook，直接写在这里（含 token，属敏感信息，不会写入日志）。
-    # 留空时使用 LARK_WEBHOOK_URL 环境变量（仍需 notify.enabled: true）。
-    # 例: "https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
     webhook_url: ""
-    # 可选：机器人开启“签名校验”时填写密钥；留空时使用 LARK_SECRET 环境变量
     secret: ""
-    # 单次投递超时
     timeout: "10s"

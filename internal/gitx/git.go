@@ -39,7 +39,8 @@ func SSHCommand(deployKey, knownHosts string) string {
 		return ""
 	}
 	cmd := "ssh -i " + strconv.Quote(deployKey) +
-		" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+		" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new" +
+		" -o ConnectTimeout=10 -o ServerAliveInterval=15"
 	if knownHosts != "" {
 		cmd += " -o UserKnownHostsFile=" + strconv.Quote(knownHosts)
 	}
@@ -74,13 +75,25 @@ func CloneAtSHA(ctx context.Context, req CloneReq, logw io.Writer) error {
 		env = append(env, "GIT_SSH_COMMAND="+cmd)
 	}
 
-	if err := runGit(ctx, env, logw, "", "clone", "--no-checkout", "--depth", "50", "--branch", req.Branch, req.URL, req.Dest); err != nil {
-		return fmt.Errorf("gitx: clone: %w", err)
+	// 优先 blobless clone：拿到完整提交历史但不下载文件内容，checkout 时按需
+	// 取 blob；比 --depth 50 更能保证 checkout 到较老的 commit。部分服务端不支持
+	// partial clone，失败后回退到浅克隆。
+	if err := runGit(ctx, env, logw, "", "clone", "--no-checkout", "--filter=blob:none", "--branch", req.Branch, req.URL, req.Dest); err != nil {
+		fmt.Fprintf(logw, "gitx: blobless clone failed, falling back to shallow clone: %v\n", err)
+		_ = os.RemoveAll(req.Dest)
+		if err := runGit(ctx, env, logw, "", "clone", "--no-checkout", "--depth", "50", "--branch", req.Branch, req.URL, req.Dest); err != nil {
+			return fmt.Errorf("gitx: clone: %w", err)
+		}
 	}
-	// 所请求的提交可能已在浅历史中；按 SHA 执行 fetch 属于尽力而为（服务器需允许），
-	// 其失败可以容忍 —— 下面的 checkout 才是真正的正确性关卡。
-	if err := runGit(ctx, env, logw, req.Dest, "fetch", "--depth", "50", "origin", req.SHA); err != nil {
-		fmt.Fprintf(logw, "gitx: fetch of %s failed (likely already present): %v\n", req.SHA, err)
+
+	// 确保目标 commit 存在；不存在时按 SHA fetch，仍失败则拉全量引用。
+	if err := runGit(ctx, env, logw, req.Dest, "cat-file", "-e", req.SHA+"^{commit}"); err != nil {
+		fmt.Fprintf(logw, "gitx: commit %s not in clone, fetching it\n", req.SHA)
+		if err := runGit(ctx, env, logw, req.Dest, "fetch", "--filter=blob:none", "origin", req.SHA); err != nil {
+			fmt.Fprintf(logw, "gitx: fetch by sha failed, fetching all branches: %v\n", err)
+			_ = runGit(ctx, env, logw, req.Dest, "fetch", "--filter=blob:none", "origin", "+refs/heads/*:refs/remotes/origin/*")
+			_ = runGit(ctx, env, logw, req.Dest, "fetch", "--unshallow")
+		}
 	}
 	if err := runGit(ctx, env, logw, req.Dest, "checkout", "--force", req.SHA); err != nil {
 		return fmt.Errorf("gitx: checkout %s: %w", req.SHA, err)
